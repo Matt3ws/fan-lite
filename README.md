@@ -50,6 +50,17 @@ There is no installer; settings live in `%APPDATA%\fan-lite`.
 - v0.2.0 and older have no updater: download v0.2.1 or newer by hand once.
 - Only one fan-lite runs at a time; starting it again shows a message instead.
 
+## Start with Windows
+
+- Settings → **Startup** → **Start with Windows**. FanLite then starts in the notification
+  area about 10 s after you sign in, with admin rights and no UAC prompt. Click the same
+  button to turn it off.
+- FanLite needs administrator rights, and Windows doesn't start such apps from "Startup apps",
+  so this is a Task Scheduler task named **FanLite** (as FanControl and HWiNFO do it). It has
+  no time limit and also runs on battery. It's removed when you turn the option off, or delete
+  it in Task Scheduler.
+- If you move fan-lite.exe, the task follows the next time FanLite starts from the new place.
+
 ## Requirements
 
 - Windows 10/11 x64, running as administrator. The exe asks for elevation itself.

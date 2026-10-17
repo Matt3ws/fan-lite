@@ -6,6 +6,7 @@ mod chrome;
 mod curve_editor;
 mod lighting;
 mod rename;
+mod startup;
 mod theme;
 mod tray;
 mod updates;
@@ -85,6 +86,10 @@ pub struct App {
     update_rx: Option<std::sync::mpsc::Receiver<updates::UpdateMsg>>,
     /// When GitHub was last asked for a new version.
     update_checked: Option<Instant>,
+    startup: startup::StartupState,
+    startup_rx: Option<std::sync::mpsc::Receiver<startup::StartupState>>,
+    /// Frames left on which to tell eframe the window is hidden (started with `--tray`).
+    hide_frames: u8,
 }
 
 /// What a fan row/display needs, gathered once per frame.
@@ -105,11 +110,15 @@ fn dim(text: impl Into<String>, font: egui::FontId) -> RichText {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, messages: Vec<String>) -> Self {
+    /// `start_hidden`: started at sign-in (`--tray`); only the tray icon shows, if there is one.
+    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, messages: Vec<String>, start_hidden: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let hwnd = chrome::native_window_tweaks(cc);
         tray::set_ctx(cc.egui_ctx.clone());
         let tray = hwnd.and_then(tray::Tray::new);
+        // Without a tray icon there would be no way to open the window, so show it then.
+        let start_hidden = start_hidden && tray.is_some();
+        chrome::START_HIDDEN.store(start_hidden, std::sync::atomic::Ordering::Relaxed);
         let ctx = cc.egui_ctx.clone();
         let engine = EngineHandle::spawn(cfg.clone(), Box::new(move || ctx.request_repaint()));
         App {
@@ -144,6 +153,9 @@ impl App {
             update: updates::UpdateState::default(),
             update_rx: None,
             update_checked: None,
+            startup: startup::StartupState::default(),
+            startup_rx: None,
+            hide_frames: if start_hidden { 2 } else { 0 },
         }
     }
 
@@ -816,6 +828,7 @@ impl App {
                 }
             });
             changed |= self.version_row(ui, key);
+            self.startup_row(ui, key);
         });
         if f != before {
             if mass {
@@ -1305,6 +1318,11 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Runs every frame and, while the window is hidden in the tray, once per engine tick.
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint();
+        }
         let events = tray::take_events();
         if events & tray::QUIT != 0 {
             self.quitting = true;
@@ -1338,6 +1356,7 @@ impl eframe::App for App {
         }
 
         self.poll_update(ctx);
+        self.poll_startup(ctx);
 
         // Debounced save; runs even while the window is minimized.
         if let Some(t) = self.dirty_since {

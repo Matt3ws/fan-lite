@@ -76,7 +76,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// A Windows tool from System32, without a console window.
-fn system_tool(name: &str) -> Command {
+pub(crate) fn system_tool(name: &str) -> Command {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let mut c = Command::new(Path::new(&root).join("System32").join(format!("{name}.exe")));
     c.creation_flags(CREATE_NO_WINDOW);
@@ -84,7 +84,7 @@ fn system_tool(name: &str) -> Command {
 }
 
 /// Run a command; its stderr (first line) is the error.
-fn run(c: &mut Command) -> Result<Vec<u8>, String> {
+pub(crate) fn run(c: &mut Command) -> Result<Vec<u8>, String> {
     let out = c.output().map_err(|e| e.to_string())?;
     if out.status.success() {
         return Ok(out.stdout);

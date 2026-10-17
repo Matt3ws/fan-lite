@@ -13,9 +13,13 @@ fn main() {
     // One fan-lite at a time: two would fight over the fans. After an in-app update the new
     // copy waits here until the old one has handed the fans back and exited.
     let updated = std::env::args().any(|a| a == "--updated");
+    // Started at sign-in (Start with Windows): only the tray icon, no window.
+    let tray = std::env::args().any(|a| a == "--tray");
     let instance = hw::win::GlobalMutex::new(INSTANCE_MUTEX);
     let Some(_running) = instance.lock(if updated { 10_000 } else { 0 }) else {
-        already_running();
+        if !tray {
+            already_running();
+        }
         return;
     };
     if let Ok(exe) = std::env::current_exe() {
@@ -50,7 +54,7 @@ fn main() {
     let _ = eframe::run_native(
         "fan-lite",
         options,
-        Box::new(|cc| Ok(Box::new(ui::App::new(cc, cfg, cfg_errors)))),
+        Box::new(|cc| Ok(Box::new(ui::App::new(cc, cfg, cfg_errors, tray)))),
     );
 }
 

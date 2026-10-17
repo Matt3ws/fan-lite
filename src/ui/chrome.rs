@@ -136,15 +136,31 @@ pub fn native_window_tweaks(cc: &eframe::CreationContext<'_>) -> Option<windows_
 /// winit's window procedure, which we forward every other message to.
 static OLD_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
+/// Started with `--tray`: eframe shows the window after its first frame no matter what, so
+/// the window procedure drops that one show (the app then tells eframe it's hidden).
+pub static START_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 unsafe extern "system" fn wndproc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     msg: u32,
     wparam: windows_sys::Win32::Foundation::WPARAM,
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CallWindowProcW, IsZoomed, WM_NCCALCSIZE, WNDPROC};
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, IsZoomed, SWP_SHOWWINDOW, WINDOWPOS, WM_NCCALCSIZE, WM_WINDOWPOSCHANGING, WNDPROC,
+    };
     if let Some(r) = super::tray::handle_message(hwnd, msg, wparam, lparam) {
         return r;
+    }
+    if msg == WM_WINDOWPOSCHANGING && START_HIDDEN.load(Ordering::Relaxed) {
+        let wp = lparam as *mut WINDOWPOS;
+        unsafe {
+            if !wp.is_null() && (*wp).flags & SWP_SHOWWINDOW != 0 {
+                (*wp).flags &= !SWP_SHOWWINDOW;
+                START_HIDDEN.store(false, Ordering::Relaxed);
+            }
+        }
     }
     // Client area = whole window rect (returning 0 leaves the proposed rect untouched).
     // Maximized windows still go to winit, which clamps them to the monitor's work area.

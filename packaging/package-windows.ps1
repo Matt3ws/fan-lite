@@ -9,5 +9,7 @@ Copy-Item "$TargetDir\release\fan-lite.exe", README.md, LICENSE $name
 Copy-Item third_party\fonts\*.txt, third_party\fonts\README.md "$name\licenses\fonts"
 Copy-Item third_party\pawnio\COPYING, third_party\pawnio\README.md "$name\licenses\pawnio"
 Compress-Archive -Path "$name\*" -DestinationPath "$name.zip" -Force
-(Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File "$name.zip.sha256" -Encoding ascii
+# LF line ending, so `sha256sum -c` also works on Linux and in Git Bash.
+$hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+[IO.File]::WriteAllText("$PWD\$name.zip.sha256", "$hash  $name.zip`n")
 Get-ChildItem "$name.zip", "$name.zip.sha256" | Format-Table Name, Length

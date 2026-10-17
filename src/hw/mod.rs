@@ -141,5 +141,8 @@ pub fn detect_all() -> Detected {
         Err(e) => diagnostics.push(format!("ASUS Aura: {e}")),
     }
 
+    // The Corsair Commander Core XT driver (rgb::corsair_core) is not used yet: on a real hub
+    // only the first port takes the colour, so the LED layout still has to be worked out.
+
     Detected { backends, diagnostics }
 }

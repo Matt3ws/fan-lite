@@ -161,6 +161,11 @@ impl Hid {
         }
     }
 
+    /// Output report length in bytes, including the report ID.
+    pub fn out_len(&self) -> usize {
+        self.out_len
+    }
+
     pub fn read(&self, timeout_ms: u32) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; self.in_len];
         let n = unsafe { self.transfer(false, buf.as_mut_ptr(), buf.len(), timeout_ms) }?;

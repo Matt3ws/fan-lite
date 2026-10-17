@@ -93,6 +93,20 @@ is noisy. It hands every fan back when it's done and stops at 90 °C.
 - With an AIO, the pump usually sits on the CPU header and the radiator fans elsewhere:
   give the radiator fans Quiet/Balanced and the pump the AIO pump preset.
 
+**Lighting** (the **Light** button)
+- **Sync all** puts one effect on every RGB zone: Static, Breathing, Color cycle, Rainbow,
+  Wave or Off, with colour, speed and brightness. Click a zone to give it its own effect or
+  to leave it alone.
+- Effects run on the devices themselves, so lighting costs no CPU. fan-lite only writes when
+  an effect changes, and never touches a light until you turn on Sync or set a zone.
+- **Save to device** stores the lighting in the device's flash, so it's there after a restart
+  without fan-lite. It's a separate button because flash wears out.
+- Supported: **ASUS Aura** mainboard controllers over USB (the board's LEDs and its ARGB
+  headers). Armoury Crate's "ASUS AURA SYNC lighting service" must be stopped; fan-lite
+  leaves the board's lighting alone while it runs.
+- Not yet: Corsair Commander Core XT (its LED layout isn't worked out), RAM and GPU
+  lighting. NZXT Kraken 2023 coolers have no lighting control over USB.
+
 **Sensors tab**
 - Watch or unwatch sensors, set the critical temperature, and set the update interval.
 

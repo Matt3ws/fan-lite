@@ -5,6 +5,7 @@
 //! when it changes, so lighting costs no CPU and keeps running after fan-lite exits.
 
 pub mod aura_usb;
+pub mod corsair_core;
 
 use std::fmt;
 

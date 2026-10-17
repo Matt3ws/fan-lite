@@ -329,7 +329,11 @@ mod live {
                 let r = a.set_light(i, &e);
                 println!("{:?} -> {}: {r:?}", kind, a.lights()[i].id);
             }
-            std::thread::sleep(std::time::Duration::from_secs(6));
+            let secs = std::env::var("FANLITE_STEP_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6);
+            std::thread::sleep(std::time::Duration::from_secs(secs));
         }
     }
 }

@@ -1,0 +1,43 @@
+[package]
+name = "fan-lite"
+version = "0.1.2"
+edition = "2024"
+description = "Minimal, low-overhead fan controller for Windows (egui)"
+license = "MIT"
+repository = "https://github.com/Matt3ws/fan-lite"
+# eframe 0.37 needs 1.95.
+rust-version = "1.95"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow"] }
+# Already part of eframe's dependency tree; used to reach our HWND for DWM tweaks.
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "fan-lite"
+path = "src/main.rs"
+# The binary embeds a requireAdministrator manifest; tests live in the library.
+test = false

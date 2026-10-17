@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Unit tests need no hardware and no admin rights (the manifest is only on the exe).
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Release package (the Release workflow's script, so packaging breaks show here)
+        shell: pwsh
+        run: ./packaging/package-windows.ps1 -Version ci
+      # Downloadable test build of every push (Actions run page → Artifacts), for testing a
+      # branch on hardware without a release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fan-lite-windows-x64-${{ github.sha }}
+          path: fan-lite-ci-windows-x64/
+          retention-days: 14

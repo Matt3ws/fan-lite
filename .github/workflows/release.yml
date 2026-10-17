@@ -1,0 +1,42 @@
+name: Release
+
+# Push a tag matching the version in Cargo.toml to build and publish a release:
+#   git tag v0.1.2 && git push origin v0.1.2
+# Every check from CI runs again first; if any fails, nothing is published.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+          }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: ./packaging/package-windows.ps1 -Version "${{ github.ref_name }}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "${{ github.ref_name }}" (Get-ChildItem fan-lite-*-windows-x64.zip*).Name `
+            --repo "${{ github.repository }}" `
+            --title "fan-lite ${{ github.ref_name }}" --generate-notes --prerelease

@@ -3,6 +3,12 @@
 A small fan controller for Windows, written in Rust with egui. It was inspired by
 [FanControl](https://github.com/Rem0o/FanControl.Releases) but does much less, on purpose.
 
+<p align="center">
+  <img src="docs/screenshots/fans.png" width="320" alt="fan-lite: the selected fan, the fan list and temperatures" valign="top">
+  &nbsp;
+  <img src="docs/screenshots/lighting.png" width="320" alt="fan-lite: the Lighting view with Sync all and the RGB zones" valign="top">
+</p>
+
 - **Monitors:** CPU temperature (AMD Ryzen, through SMN), motherboard temperatures and fan RPM
   (Nuvoton NCT6797D/98D/99D Super I/O), and NVIDIA GPU temperature and fans (NVML).
 - **Controls:** motherboard fan headers, NVIDIA GPU fans, and NZXT Kraken AIO coolers

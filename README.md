@@ -153,7 +153,8 @@ is noisy. It hands every fan back when it's done and stops at 90 °C.
   20 frames a second while one animates, otherwise one frame every 4 s) and the hub goes back
   to its own stored lighting when fan-lite quits. iCUE must be closed. The hub
   is left alone if fans are plugged into it (software mode would take over their speed).
-- Not yet: RAM and GPU lighting. NZXT Kraken 2023 coolers have no lighting control over USB.
+- Not supported: RAM lighting (use iCUE or Armoury Crate for it and set the RAM zones there)
+  and GPU lighting. NZXT Kraken 2023 coolers have no lighting control over USB.
 
 **Sensors tab**
 - Watch or unwatch sensors, set the critical temperature, and set the update interval.

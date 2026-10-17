@@ -90,6 +90,10 @@ pub trait Backend {
     fn set_light(&mut self, _i: usize, _e: &Effect) -> Result<(), HwError> {
         Err("this device has no lighting".into())
     }
+    /// Whether [`Self::save_lights`] can store lighting on the device.
+    fn can_save_lights(&self) -> bool {
+        false
+    }
     /// Store the current lighting in the device's flash, so it survives power cycles
     /// without fan-lite. Only on request: flash wears out.
     fn save_lights(&mut self) -> Result<(), HwError> {

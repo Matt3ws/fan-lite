@@ -391,10 +391,6 @@ impl Backend for CommanderCore {
             None => Ok(()),
         }
     }
-
-    fn save_lights(&mut self) -> Result<(), HwError> {
-        Err("the Corsair hub can't store lighting; it shows fan-lite's colours while fan-lite runs".into())
-    }
 }
 
 impl Drop for CommanderCore {

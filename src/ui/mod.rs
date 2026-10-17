@@ -1412,15 +1412,34 @@ impl eframe::App for App {
                 None => {}
             }
         }
-        if let Some((seq, errors)) = &snap.light_save
-            && *seq != self.light_save_seen
+        if let Some(s) = &snap.light_save
+            && s.seq != self.light_save_seen
         {
-            self.light_save_seen = *seq;
-            self.light_note = Some(if errors.is_empty() {
-                "Saved to the devices.".into()
-            } else {
-                format!("Saving failed: {}", errors.join("; "))
-            });
+            self.light_save_seen = s.seq;
+            let mut note = Vec::new();
+            if !s.saved.is_empty() {
+                note.push(format!("Saved to {}.", s.saved.join(", ")));
+            }
+            if !s.errors.is_empty() {
+                note.push(format!("Saving failed: {}.", s.errors.join("; ")));
+            }
+            // Zones FanLite lights on devices that can't store it.
+            let mut volatile: Vec<&str> = snap
+                .inv
+                .lights
+                .iter()
+                .zip(&snap.lights)
+                .filter(|(i, v)| !i.saveable && v.applied.is_some())
+                .map(|(i, _)| i.backend)
+                .collect();
+            volatile.dedup();
+            if !volatile.is_empty() {
+                note.push(format!(
+                    "{} can't store lighting: it shows these colours while FanLite runs.",
+                    volatile.join(", ")
+                ));
+            }
+            self.light_note = Some(note.join(" "));
         }
         let mut content_h = 0.0;
         // Both closures need `self`; the title runs first, then the content.

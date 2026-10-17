@@ -98,7 +98,13 @@ fn effect_editor(ui: &mut egui::Ui, e: &mut Effect, kinds: Option<&[Kind]>) -> b
 impl App {
     pub(super) fn lighting_view(&mut self, ui: &mut egui::Ui, snap: &Snapshot) -> bool {
         let mut changed = false;
-        let any_applied = snap.lights.iter().any(|l| l.applied.is_some());
+        // "Save to device" only when a device that can store lighting shows some from FanLite.
+        let any_applied = snap
+            .inv
+            .lights
+            .iter()
+            .zip(&snap.lights)
+            .any(|(info, view)| info.saveable && view.applied.is_some());
         ui.horizontal(|ui| {
             if theme::button(ui, Some(Icon::Left), "Back", None, false).clicked() {
                 self.view = View::Main;

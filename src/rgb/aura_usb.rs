@@ -230,6 +230,10 @@ impl Backend for AuraUsb {
         }
     }
 
+    fn can_save_lights(&self) -> bool {
+        true
+    }
+
     fn save_lights(&mut self) -> Result<(), HwError> {
         self.send(&[&SAVE_CMD])
     }

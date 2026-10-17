@@ -80,6 +80,18 @@ pub struct LightInfo {
     pub backend: &'static str,
     pub leds: u16,
     pub kinds: Vec<Kind>,
+    /// The device can store its lighting ("Save to device").
+    pub saveable: bool,
+}
+
+/// Outcome of a "Save to device".
+#[derive(Clone, Debug, Default)]
+pub struct LightSave {
+    /// Increments per save, so the UI can tell a new result.
+    pub seq: u64,
+    /// Devices that stored their lighting.
+    pub saved: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 /// Static description of the detected hardware.
@@ -121,8 +133,7 @@ pub struct Snapshot {
     pub calibrating: Option<(String, f32, usize, usize)>,
     pub last_calib: Option<CalibReport>,
     pub lights: Vec<LightView>,
-    /// Result of the last "Save to device": (sequence number, errors).
-    pub light_save: Option<(u64, Vec<String>)>,
+    pub light_save: Option<LightSave>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -277,7 +288,7 @@ pub struct Engine {
     ctl_loc: Vec<Loc>,
     light_loc: Vec<Loc>,
     lights: Vec<LightState>,
-    light_save: Option<(u64, Vec<String>)>,
+    light_save: Option<LightSave>,
     // Per-backend read buffers.
     buf_t: Vec<Vec<Option<f32>>>,
     buf_f: Vec<Vec<Option<f32>>>,
@@ -345,6 +356,7 @@ impl Engine {
                     backend: be.name(),
                     leds: z.leds,
                     kinds: z.kinds.clone(),
+                    saveable: be.can_save_lights(),
                 });
                 light_loc.push((b, i));
             }
@@ -670,21 +682,28 @@ impl Engine {
         }
     }
 
-    /// "Save to device": every backend with lighting stores what it shows now.
+    /// "Save to device": every device that can store lighting, and shows some from fan-lite,
+    /// stores what it shows now.
     pub fn save_lights(&mut self) {
-        let mut errors = Vec::new();
+        let mut save = LightSave {
+            seq: self.light_save.as_ref().map_or(0, |s| s.seq) + 1,
+            ..Default::default()
+        };
         for (b, be) in self.backends.iter_mut().enumerate() {
             let used = self
                 .light_loc
                 .iter()
                 .zip(&self.lights)
                 .any(|(&(lb, _), st)| lb == b && st.applied.is_some());
-            if used && let Err(e) = be.save_lights() {
-                errors.push(format!("{}: {e}", be.name()));
+            if !used || !be.can_save_lights() {
+                continue;
+            }
+            match be.save_lights() {
+                Ok(()) => save.saved.push(be.name().to_owned()),
+                Err(e) => save.errors.push(format!("{}: {e}", be.name())),
             }
         }
-        let seq = self.light_save.as_ref().map_or(0, |s| s.0) + 1;
-        self.light_save = Some((seq, errors));
+        self.light_save = Some(save);
     }
 
     pub fn publish(&self, out: &Mutex<Snapshot>) {

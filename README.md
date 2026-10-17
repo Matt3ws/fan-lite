@@ -1,4 +1,4 @@
-# Fan lite
+# FanLite
 
 A small fan controller for Windows, written in Rust with egui. It was inspired by
 [FanControl](https://github.com/Rem0o/FanControl.Releases) but does much less, on purpose.

@@ -7,3 +7,4 @@ pub mod hw;
 pub mod listen;
 pub mod rgb;
 pub mod ui;
+pub mod update;

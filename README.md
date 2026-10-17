@@ -20,6 +20,19 @@ Get `fan-lite-<version>-windows-x64.zip` from [Releases](../../releases), unzip 
 run `fan-lite.exe`. Each zip has a `.sha256` file next to it for checking the download.
 There is no installer; settings live in `%APPDATA%\fan-lite`.
 
+## Updates
+
+- fan-lite looks for a new release on GitHub when it starts and once a day while it runs.
+  When there is one, **Update vX.Y.Z** appears in the title bar.
+- Click it and fan-lite downloads the release zip, checks its SHA-256, swaps its exe and
+  restarts into the new version. The fans are back under firmware control for a second or
+  two during the restart.
+- Settings → **Version** has **Check now**, and **Auto** turns the automatic check off.
+- If Windows refuses to start the new version (Smart App Control can block unsigned apps),
+  fan-lite puts the old exe back and keeps running.
+- v0.2.0 and older have no updater: download v0.2.1 or newer by hand once.
+- Only one fan-lite runs at a time; starting it again shows a message instead.
+
 ## Requirements
 
 - Windows 10/11 x64, running as administrator. The exe asks for elevation itself.

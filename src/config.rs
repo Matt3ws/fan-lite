@@ -254,6 +254,8 @@ pub struct Config {
     pub critical_c: f32,
     /// Spinning fan icons in the UI (costs a ~60 fps repaint while visible).
     pub animations: bool,
+    /// Look for a newer release on GitHub at start and once a day.
+    pub update_check: bool,
     pub unwatched: BTreeSet<String>,
     pub labels: BTreeMap<String, String>,
     /// Explicit fan visibility: `false` = hidden, `true` = always shown. Fans without an entry
@@ -275,6 +277,7 @@ impl Default for Config {
             interval_ms: 1000,
             critical_c: 90.0,
             animations: true,
+            update_check: true,
             unwatched: BTreeSet::new(),
             labels: BTreeMap::new(),
             visibility: BTreeMap::new(),
@@ -353,6 +356,7 @@ impl Config {
         let mut s = String::from("# fan-lite configuration\n");
         s += &format!("interval_ms {}\ncritical_c {}\n", self.interval_ms, self.critical_c);
         s += &format!("animations {}\n", if self.animations { "on" } else { "off" });
+        s += &format!("update_check {}\n", if self.update_check { "on" } else { "off" });
         for id in &self.unwatched {
             s += &format!("unwatch {id}\n");
         }
@@ -486,6 +490,7 @@ fn parse_line(cfg: &mut Config, line: &str) -> Result<(), String> {
         "interval_ms" => cfg.interval_ms = one()?.parse().map_err(|_| "bad interval")?,
         "critical_c" => cfg.critical_c = num(&one()?)?,
         "animations" => cfg.animations = matches!(one()?.as_str(), "on" | "true" | "1"),
+        "update_check" => cfg.update_check = matches!(one()?.as_str(), "on" | "true" | "1"),
         "unwatch" => {
             cfg.unwatched.insert(one()?);
         }
@@ -674,6 +679,7 @@ mod tests {
             interval_ms: 750,
             critical_c: 88.0,
             animations: false,
+            update_check: false,
             ..Default::default()
         };
         cfg.unwatched.insert("nct/src3".into());

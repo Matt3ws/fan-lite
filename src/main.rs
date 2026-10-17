@@ -10,6 +10,17 @@ fn main() {
         probe();
         return;
     }
+    // One fan-lite at a time: two would fight over the fans. After an in-app update the new
+    // copy waits here until the old one has handed the fans back and exited.
+    let updated = std::env::args().any(|a| a == "--updated");
+    let instance = hw::win::GlobalMutex::new(INSTANCE_MUTEX);
+    let Some(_running) = instance.lock(if updated { 10_000 } else { 0 }) else {
+        already_running();
+        return;
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        fan_lite::update::clean_up(&exe);
+    }
     if std::env::args().any(|a| a == "--listen-test") {
         // Diagnostic: drive one fan group at a time so the user can hear which is loud.
         let log = fan_lite::listen::run();
@@ -41,6 +52,23 @@ fn main() {
         options,
         Box::new(|cc| Ok(Box::new(ui::App::new(cc, cfg, cfg_errors)))),
     );
+}
+
+/// Held for the life of the process (see `main`).
+const INSTANCE_MUTEX: &str = "Local\\fan-lite.instance";
+
+fn already_running() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+    let text = hw::win::wide("fan-lite is already running. Find it in the notification area by the clock.");
+    let title = hw::win::wide("fan-lite");
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        )
+    };
 }
 
 /// Read-only hardware report: detect, read once, print. Never writes to hardware.

@@ -8,6 +8,7 @@ mod lighting;
 mod rename;
 mod theme;
 mod tray;
+mod updates;
 
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::TAU;
@@ -80,6 +81,10 @@ pub struct App {
     /// Outcome of the last "Save to device", shown under the zone list.
     light_note: Option<String>,
     light_save_seen: u64,
+    update: updates::UpdateState,
+    update_rx: Option<std::sync::mpsc::Receiver<updates::UpdateMsg>>,
+    /// When GitHub was last asked for a new version.
+    update_checked: Option<Instant>,
 }
 
 /// What a fan row/display needs, gathered once per frame.
@@ -136,6 +141,9 @@ impl App {
             light_sel: None,
             light_note: None,
             light_save_seen: 0,
+            update: updates::UpdateState::default(),
+            update_rx: None,
+            update_checked: None,
         }
     }
 
@@ -279,6 +287,7 @@ impl App {
                 self.notices_open = !self.notices_open;
             }
         }
+        self.update_title(ui);
     }
 
     fn banners(&mut self, ui: &mut egui::Ui, snap: &Snapshot) {
@@ -780,7 +789,7 @@ impl App {
                 changed |= self.calibration_rows(ui, snap, row, &mut f);
             }
             ui.horizontal(|ui| {
-                key(ui, "Update");
+                key(ui, "Interval");
                 for ms in [500u32, 1000, 2000, 5000] {
                     let label = if ms < 1000 {
                         format!("{ms}ms")
@@ -806,6 +815,7 @@ impl App {
                     });
                 }
             });
+            changed |= self.version_row(ui, key);
         });
         if f != before {
             if mass {
@@ -1326,6 +1336,8 @@ impl eframe::App for App {
                 }
             }
         }
+
+        self.poll_update(ctx);
 
         // Debounced save; runs even while the window is minimized.
         if let Some(t) = self.dirty_since {

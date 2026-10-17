@@ -1,4 +1,15 @@
-# FanLite
+<h1 align="center">FanLite</h1>
+
+<p align="center"><b>A small, low-overhead fan and RGB controller for Windows.</b></p>
+
+<p align="center">Give every fan a curve and every light a colour, then close the window. FanLite keeps working from the tray.</p>
+
+<p align="center">
+  <a href="https://github.com/Matt3ws/fan-lite/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Matt3ws/fan-lite/ci.yml?branch=main&label=CI&logo=github"></a>
+  <a href="https://github.com/Matt3ws/fan-lite/releases"><img alt="release" src="https://img.shields.io/github/v/release/Matt3ws/fan-lite?include_prereleases&label=release"></a>
+  <a href="LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="platform: Windows 10/11" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey">
+</p>
 
 A small fan controller for Windows, written in Rust with egui. It was inspired by
 [FanControl](https://github.com/Rem0o/FanControl.Releases) but does much less, on purpose.

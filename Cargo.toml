@@ -1,6 +1,6 @@
 [package]
 name = "fan-lite"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 description = "Minimal, low-overhead fan controller for Windows (egui)"
 license = "MIT"
@@ -38,7 +38,7 @@ codegen-units = 1
 strip = true
 
 [[bin]]
-name = "fan-lite"
+name = "FanLite"
 path = "src/main.rs"
 # The binary embeds a requireAdministrator manifest; tests live in the library.
 test = false

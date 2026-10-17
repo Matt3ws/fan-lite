@@ -26,7 +26,8 @@ pub(super) enum UpdateState {
 
 pub(super) enum UpdateMsg {
     Checked(Result<Option<String>, String>),
-    Installed(String, Result<(), String>),
+    /// The tag, and where the new exe went.
+    Installed(String, Result<std::path::PathBuf, String>),
 }
 
 impl App {
@@ -81,30 +82,26 @@ impl App {
             UpdateMsg::Checked(Ok(None)) => UpdateState::UpToDate,
             UpdateMsg::Checked(Err(e)) => UpdateState::Failed(format!("Update check failed: {e}")),
             UpdateMsg::Installed(_, Err(e)) => UpdateState::Failed(format!("Update failed: {e}")),
-            UpdateMsg::Installed(tag, Ok(())) => self.restart_into(&tag, ctx),
+            UpdateMsg::Installed(tag, Ok(new)) => self.restart_into(&tag, &new, ctx),
         };
     }
 
     /// Start the freshly installed exe and close this one. The new copy waits for this one to
     /// exit (and hand the fans back) before it takes over. If Windows refuses to start it
     /// (e.g. Smart App Control), the old exe is put back and keeps running.
-    fn restart_into(&mut self, tag: &str, ctx: &egui::Context) -> UpdateState {
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => return UpdateState::Failed(format!("{tag} installed; restart fan-lite to use it ({e})")),
-        };
-        match std::process::Command::new(&exe).arg("--updated").spawn() {
+    fn restart_into(&mut self, tag: &str, new: &std::path::Path, ctx: &egui::Context) -> UpdateState {
+        match std::process::Command::new(new).arg("--updated").spawn() {
             Ok(_) => {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 UpdateState::Installing(tag.to_owned())
             }
             Err(e) => {
-                let kept = update::rollback(&exe).is_ok();
+                let kept = std::env::current_exe().is_ok_and(|exe| update::rollback(&exe, new).is_ok());
                 UpdateState::Failed(if kept {
                     format!("Windows didn't start {tag} ({e}); still running v{}", update::CURRENT)
                 } else {
-                    format!("{tag} installed but didn't start ({e}); start fan-lite again")
+                    format!("{tag} installed but didn't start ({e}); start FanLite again")
                 })
             }
         }

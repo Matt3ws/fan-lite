@@ -26,9 +26,13 @@ pub const REPO: &str = {
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const USER_AGENT: &str = concat!("fan-lite/", env!("CARGO_PKG_VERSION"));
 /// The exe's name inside the release zip.
-const EXE: &str = "fan-lite.exe";
+const EXE: &str = "FanLite.exe";
 /// Where the running exe is moved while the new one takes its place.
-const OLD: &str = "fan-lite.old.exe";
+const OLD: &str = "FanLite.old.exe";
+/// Names up to v0.2.6. An install still called fan-lite.exe gets FanLite.exe next to it on its
+/// next update and the old file is removed once the new one runs.
+const LEGACY_EXE: &str = "fan-lite.exe";
+const LEGACY_OLD: &str = "fan-lite.old.exe";
 
 /// `vX.Y.Z` or `X.Y.Z` as a comparable triple; anything else (e.g. `-rc1`) is `None`.
 pub fn version(tag: &str) -> Option<(u32, u32, u32)> {
@@ -127,16 +131,16 @@ pub fn is_dev_build(exe: &Path) -> bool {
         .is_some_and(|n| n.eq_ignore_ascii_case("target"))
 }
 
-/// Download release `tag`, check it and swap it in for the exe at `exe`. On success the old
-/// exe is at `fan-lite.old.exe` next to it (see [`rollback`] and [`clean_up`]).
-pub fn install(tag: &str, exe: &Path) -> Result<(), String> {
+/// Download release `tag`, check it and put it in place for the running `exe` (see [`place`]).
+/// Returns the path of the new exe, to start.
+pub fn install(tag: &str, exe: &Path) -> Result<PathBuf, String> {
     if is_dev_build(exe) {
         return Err("this is a development build: update it with git pull and cargo build".into());
     }
     let dir = work_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let name = format!("fan-lite-{tag}-windows-x64.zip");
+    let name = format!("FanLite-{tag}-windows-x64.zip");
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{name}");
     let zip = dir.join(&name);
     run(curl().arg("--output").arg(&zip).arg(&url))?;
@@ -157,10 +161,27 @@ pub fn install(tag: &str, exe: &Path) -> Result<(), String> {
     if !new.is_file() {
         return Err(format!("{EXE} is not in the release zip; nothing was changed"));
     }
-    swap(exe, &new)
+    place(exe, &new)
 }
 
-/// Move `cur` to `fan-lite.old.exe` beside it and copy `new` into its place. If the copy
+fn is_named(path: &Path, name: &str) -> bool {
+    path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// Put the new exe in place for the running `cur` and return where it went: swapped in for
+/// `cur` if that is FanLite.exe, else (an install from before the rename) copied to
+/// FanLite.exe beside it, leaving `cur` alone.
+pub fn place(cur: &Path, new: &Path) -> Result<PathBuf, String> {
+    if is_named(cur, EXE) {
+        swap(cur, new)?;
+        return Ok(cur.to_path_buf());
+    }
+    let target = cur.with_file_name(EXE);
+    std::fs::copy(new, &target).map_err(|e| format!("cannot write {EXE} ({e}); nothing was changed"))?;
+    Ok(target)
+}
+
+/// Move `cur` to `FanLite.old.exe` beside it and copy `new` into its place. If the copy
 /// fails, `cur` is put back.
 pub fn swap(cur: &Path, new: &Path) -> Result<(), String> {
     let old = cur.with_file_name(OLD);
@@ -174,8 +195,12 @@ pub fn swap(cur: &Path, new: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Undo a [`swap`]: the new exe is removed and the old one put back.
-pub fn rollback(cur: &Path) -> Result<(), String> {
+/// Undo [`place`] for the running `cur` and the `installed` exe it returned: a swap is reversed
+/// (the old exe put back); a copy next to it is removed.
+pub fn rollback(cur: &Path, installed: &Path) -> Result<(), String> {
+    if installed != cur {
+        return std::fs::remove_file(installed).map_err(|e| e.to_string());
+    }
     let old = cur.with_file_name(OLD);
     if !old.is_file() {
         return Err("no previous version to go back to".into());
@@ -184,9 +209,21 @@ pub fn rollback(cur: &Path) -> Result<(), String> {
     std::fs::rename(&old, cur).map_err(|e| e.to_string())
 }
 
+/// Files an earlier update leaves next to the running `exe`: the previous version, and once
+/// FanLite.exe runs, the fan-lite.exe it replaced.
+fn leftovers(exe: &Path) -> Vec<PathBuf> {
+    let mut v = vec![exe.with_file_name(OLD), exe.with_file_name(LEGACY_OLD)];
+    if is_named(exe, EXE) {
+        v.push(exe.with_file_name(LEGACY_EXE));
+    }
+    v
+}
+
 /// Remove what an earlier update left behind. Run at every start.
 pub fn clean_up(exe: &Path) {
-    let _ = std::fs::remove_file(exe.with_file_name(OLD));
+    for f in leftovers(exe) {
+        let _ = std::fs::remove_file(f);
+    }
     let _ = std::fs::remove_dir_all(work_dir());
 }
 
@@ -195,10 +232,9 @@ pub fn clean_up(exe: &Path) {
 /// trying for a few seconds.
 pub fn clean_up_after_update(exe: PathBuf) {
     std::thread::spawn(move || {
-        let old = exe.with_file_name(OLD);
         for _ in 0..50 {
             clean_up(&exe);
-            if !old.exists() {
+            if leftovers(&exe).iter().all(|f| !f.exists()) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -248,20 +284,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn swap_and_rollback() {
-        let dir = std::env::temp_dir().join(format!("fan-lite-swap-test-{}", std::process::id()));
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fan-lite-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cur = dir.join("fan-lite.exe");
+        dir
+    }
+
+    #[test]
+    fn place_swaps_and_rolls_back() {
+        let dir = temp("swap-test");
+        let cur = dir.join(EXE);
         let new = dir.join("new.exe");
         std::fs::write(&cur, b"old").unwrap();
         std::fs::write(&new, b"new").unwrap();
 
-        swap(&cur, &new).unwrap();
+        assert_eq!(place(&cur, &new).unwrap(), cur);
         assert_eq!(std::fs::read(&cur).unwrap(), b"new");
         assert_eq!(std::fs::read(dir.join(OLD)).unwrap(), b"old");
-        rollback(&cur).unwrap();
+        rollback(&cur, &cur).unwrap();
         assert_eq!(std::fs::read(&cur).unwrap(), b"old");
         assert!(!dir.join(OLD).exists());
 
@@ -272,6 +313,36 @@ mod tests {
         std::fs::write(dir.join(OLD), b"leftover").unwrap();
         clean_up(&cur);
         assert!(!dir.join(OLD).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_name_moves_to_fanlite_exe() {
+        let dir = temp("rename-test");
+        let legacy = dir.join(LEGACY_EXE);
+        let new = dir.join("new.exe");
+        std::fs::write(&legacy, b"old").unwrap();
+        std::fs::write(&new, b"new").unwrap();
+
+        // fan-lite.exe stays (it is running); FanLite.exe is written next to it.
+        let placed = place(&legacy, &new).unwrap();
+        assert!(is_named(&placed, EXE));
+        assert_eq!(std::fs::read(&placed).unwrap(), b"new");
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"old");
+        // If FanLite.exe won't start, it goes again.
+        rollback(&legacy, &placed).unwrap();
+        assert!(!placed.exists() && legacy.exists());
+
+        // Once FanLite.exe runs, the old fan-lite.exe (and its .old) are removed.
+        let placed = place(&legacy, &new).unwrap();
+        std::fs::write(dir.join(LEGACY_OLD), b"older").unwrap();
+        clean_up(&placed);
+        assert!(!legacy.exists() && !dir.join(LEGACY_OLD).exists());
+        assert!(placed.exists());
+        // But fan-lite.exe doesn't remove a FanLite.exe next to it.
+        std::fs::write(&legacy, b"x").unwrap();
+        clean_up(&legacy);
+        assert!(placed.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -302,6 +373,7 @@ mod live {
         let exe = dir.join("fan-lite.exe");
         std::fs::write(&exe, b"dummy").unwrap();
         println!("install: {:?}", super::install("v0.2.0", &exe));
+        println!("(v0.2.0 has no FanLite zip yet, so an error here is expected before 0.2.7)");
         let new = std::fs::metadata(&exe).map(|m| m.len()).unwrap_or(0);
         let old = std::fs::read(dir.join(super::OLD)).unwrap_or_default();
         println!("new exe {new} bytes, old exe {:?}", String::from_utf8_lossy(&old));

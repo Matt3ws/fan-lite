@@ -21,14 +21,14 @@ fn main() {
     } else {
         "requireAdministrator"
     };
-    println!("cargo:rustc-link-arg-bin=fan-lite=/MANIFEST:EMBED");
-    println!("cargo:rustc-link-arg-bin=fan-lite=/MANIFESTUAC:level='{level}' uiAccess='false'");
+    println!("cargo:rustc-link-arg-bin=FanLite=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg-bin=FanLite=/MANIFESTUAC:level='{level}' uiAccess='false'");
 
     // The icon as a compiled resource file, which link.exe takes as an input (no rc.exe needed).
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let res = out.join("icon.res");
     std::fs::write(&res, icon_res()).expect("write icon.res");
-    println!("cargo:rustc-link-arg-bin=fan-lite={}", res.display());
+    println!("cargo:rustc-link-arg-bin=FanLite={}", res.display());
 }
 
 /// One icon image: BITMAPINFOHEADER (height doubled for the AND mask), 32-bit BGRA rows

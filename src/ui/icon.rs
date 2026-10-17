@@ -1,5 +1,5 @@
 //! The amber fan glyph as RGBA pixels: the tray icon, the window icon, and (through
-//! `build.rs`, which includes this file) the icon embedded in fan-lite.exe. Plain Rust with no
+//! `build.rs`, which includes this file) the icon embedded in FanLite.exe. Plain Rust with no
 //! crate dependencies, so the build script can use it too.
 
 use std::f32::consts::TAU;

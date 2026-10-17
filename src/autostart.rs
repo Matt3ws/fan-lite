@@ -1,4 +1,4 @@
-//! Start with Windows: a Task Scheduler task that runs `fan-lite.exe --tray` at sign-in.
+//! Start with Windows: a Task Scheduler task that runs `FanLite.exe --tray` at sign-in.
 //!
 //! FanLite needs administrator rights, and Windows doesn't start such apps from the Run key
 //! or the Startup folder ("Startup apps"). A logon task with the highest privileges starts it

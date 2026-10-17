@@ -33,8 +33,8 @@ A small fan controller for Windows, written in Rust with egui. It was inspired b
 
 ## Download
 
-Get `fan-lite-<version>-windows-x64.zip` from [Releases](../../releases), unzip it anywhere and
-run `fan-lite.exe`. Each zip has a `.sha256` file next to it for checking the download.
+Get `FanLite-<version>-windows-x64.zip` from [Releases](../../releases), unzip it anywhere and
+run `FanLite.exe`. Each zip has a `.sha256` file next to it for checking the download.
 There is no installer; settings live in `%APPDATA%\fan-lite`.
 
 ## Updates
@@ -48,6 +48,9 @@ There is no installer; settings live in `%APPDATA%\fan-lite`.
 - If Windows refuses to start the new version (Smart App Control can block unsigned apps),
   fan-lite puts the old exe back and keeps running.
 - v0.2.0 and older have no updater: download v0.2.1 or newer by hand once.
+- The exe was called fan-lite.exe up to v0.2.6. Those versions update to FanLite.exe by
+  themselves: the first update installs the new version, the next one renames it and removes
+  fan-lite.exe. Shortcuts to fan-lite.exe have to be made again.
 - Only one fan-lite runs at a time; starting it again shows a message instead.
 
 ## Start with Windows
@@ -59,7 +62,7 @@ There is no installer; settings live in `%APPDATA%\fan-lite`.
   so this is a Task Scheduler task named **FanLite** (as FanControl and HWiNFO do it). It has
   no time limit and also runs on battery. It's removed when you turn the option off, or delete
   it in Task Scheduler.
-- If you move fan-lite.exe, the task follows the next time FanLite starts from the new place.
+- If you move FanLite.exe, the task follows the next time FanLite starts from the new place.
 
 ## Requirements
 
@@ -74,9 +77,9 @@ Hardware that isn't supported is reported under **Notices** and skipped.
 ## Usage
 
 ```
-fan-lite.exe            # GUI
-fan-lite.exe --probe    # read-only hardware report, also saved to %APPDATA%\fan-lite\probe.txt
-fan-lite.exe --listen-test
+FanLite.exe             # GUI
+FanLite.exe --probe     # read-only hardware report, also saved to %APPDATA%\fan-lite\probe.txt
+FanLite.exe --listen-test
 ```
 
 `--listen-test` makes one fan group loud at a time, marked by beeps, so you can hear which one

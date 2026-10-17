@@ -29,6 +29,6 @@ jobs:
       # branch on hardware without a release.
       - uses: actions/upload-artifact@v4
         with:
-          name: fan-lite-windows-x64-${{ github.sha }}
-          path: fan-lite-ci-windows-x64/
+          name: FanLite-windows-x64-${{ github.sha }}
+          path: FanLite-ci-windows-x64/
           retention-days: 14

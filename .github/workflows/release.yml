@@ -37,6 +37,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" (Get-ChildItem fan-lite-*-windows-x64.zip*).Name `
+          gh release create "${{ github.ref_name }}" (Get-ChildItem FanLite-*-windows-x64.zip*, fan-lite-*-windows-x64.zip*).Name `
             --repo "${{ github.repository }}" `
             --title "fan-lite ${{ github.ref_name }}" --generate-notes --prerelease

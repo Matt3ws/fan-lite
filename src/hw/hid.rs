@@ -207,6 +207,9 @@ impl Hid {
     }
 }
 
+// The handles may be used from any thread; a `Hid` is only ever used by one at a time.
+unsafe impl Send for Hid {}
+
 impl Drop for Hid {
     fn drop(&mut self) {
         unsafe {

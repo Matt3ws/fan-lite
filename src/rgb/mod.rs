@@ -29,6 +29,29 @@ impl Rgb {
         Some(Rgb(c(0)?, c(2)?, c(4)?))
     }
 
+    /// Fully saturated colour at hue `h` (turns: 0.0 = red, 1/3 = green, 2/3 = blue; wraps).
+    pub fn hue(h: f32) -> Rgb {
+        let h = h.rem_euclid(1.0) * 6.0;
+        let x = 1.0 - (h % 2.0 - 1.0).abs();
+        let (r, g, b) = match h as u32 {
+            0 => (1.0, x, 0.0),
+            1 => (x, 1.0, 0.0),
+            2 => (0.0, 1.0, x),
+            3 => (0.0, x, 1.0),
+            4 => (x, 0.0, 1.0),
+            _ => (1.0, 0.0, x),
+        };
+        let c = |v: f32| (v * 255.0).round() as u8;
+        Rgb(c(r), c(g), c(b))
+    }
+
+    /// The colour at `f` (0.0..=1.0) of its brightness.
+    pub fn dimmed(self, f: f32) -> Rgb {
+        let f = f.clamp(0.0, 1.0);
+        let s = |v: u8| (v as f32 * f).round() as u8;
+        Rgb(s(self.0), s(self.1), s(self.2))
+    }
+
     /// The colour at `pct` % brightness, for devices without their own brightness setting.
     pub fn scaled(self, pct: u8) -> Rgb {
         let s = |v: u8| ((v as u32 * pct.min(100) as u32 + 50) / 100) as u8;
@@ -248,6 +271,11 @@ mod tests {
         assert_eq!(Rgb(200, 100, 0).scaled(50), Rgb(100, 50, 0));
         assert_eq!(Rgb(255, 255, 255).scaled(100), Rgb(255, 255, 255));
         assert_eq!(Rgb(255, 255, 255).scaled(0), Rgb::BLACK);
+        assert_eq!(Rgb::hue(0.0), Rgb(255, 0, 0));
+        assert_eq!(Rgb::hue(1.0 / 3.0), Rgb(0, 255, 0));
+        assert_eq!(Rgb::hue(2.0 / 3.0), Rgb(0, 0, 255));
+        assert_eq!(Rgb::hue(1.25), Rgb::hue(0.25), "wraps");
+        assert_eq!(Rgb(200, 100, 0).dimmed(0.5), Rgb(100, 50, 0));
     }
 
     #[test]

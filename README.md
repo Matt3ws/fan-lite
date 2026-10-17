@@ -118,8 +118,9 @@ is noisy. It hands every fan back when it's done and stops at 90 °C.
   headers). Armoury Crate's "ASUS AURA SYNC lighting service" must be stopped; fan-lite
   leaves the board's lighting alone while it runs.
 - Supported: **Corsair iCUE Commander Core XT**, one zone per RGB port (and the 3-pin strip).
-  The hub only takes colours from software, so it shows static colours while fan-lite runs
-  and goes back to its own stored lighting when fan-lite quits. iCUE must be closed. The hub
+  The hub only takes colours from software, so fan-lite renders every effect itself (about
+  20 frames a second while one animates, otherwise one frame every 4 s) and the hub goes back
+  to its own stored lighting when fan-lite quits. iCUE must be closed. The hub
   is left alone if fans are plugged into it (software mode would take over their speed).
 - Not yet: RAM and GPU lighting. NZXT Kraken 2023 coolers have no lighting control over USB.
 

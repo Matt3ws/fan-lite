@@ -14,20 +14,23 @@
 //! - endpoint `22` (type `12 00`): colours, R,G,B per LED: the strip's LEDs, then each fan
 //!   port as a 34-LED group (fans with fewer LEDs use the start of their group)
 //!
-//! Lighting only works in software mode: fan-lite configures the ports the way SignalRGB does,
-//! keeps the colour endpoint open and re-sends the colours every few seconds. When fan-lite
-//! exits the hub goes back to its own stored lighting. Colours are static (the hub runs no
-//! effects of its own in software mode).
+//! Lighting only works in software mode, and the hub runs no effects of its own there, so a
+//! worker thread renders them: ~20 frames a second while an animated effect is on, otherwise
+//! one frame on each change plus a keepalive every few seconds. fan-lite configures the ports
+//! the way SignalRGB does. When fan-lite exits the hub goes back to its own stored lighting.
 //!
 //! Software mode would also hand the hub's fan outputs to fan-lite, so the hub is only used
 //! when no fan is connected to it.
 
+use std::f32::consts::TAU;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::hw::hid::{self, Hid};
 use crate::hw::win::process_running;
 use crate::hw::{Backend, Channel, ControlChannel, HwError, LightZone};
-use crate::rgb::{Effect, Kind, Rgb};
+use crate::rgb::{Effect, Kind, Rgb, Speed};
 
 const VID: &str = "vid_1b1c";
 const PID: &str = "pid_0c2a";
@@ -38,10 +41,15 @@ const MAX_READS: usize = 8;
 /// Fan ports, each a 34-LED group in the colour data.
 const PORTS: usize = 6;
 const PORT_SLOTS: usize = 34;
+/// Channels: the 3-pin strip, then the fan ports.
+const CHANNELS: usize = PORTS + 1;
 /// The hub leaves software mode on its own if nothing arrives for ~10 s.
 const KEEPALIVE: Duration = Duration::from_secs(4);
+/// Frame interval while an effect animates.
+const FRAME: Duration = Duration::from_millis(50);
+/// After an error (iCUE running, device gone), wait this long before trying again.
+const RETRY: Duration = Duration::from_secs(5);
 const OWNER: &[&str] = &["icue"];
-const OWNER_RECHECK: Duration = Duration::from_secs(5);
 
 const WAKE: [u8; 4] = [0x01, 0x03, 0x00, 0x02];
 const SLEEP: [u8; 4] = [0x01, 0x03, 0x00, 0x01];
@@ -99,34 +107,74 @@ pub fn port_config() -> Vec<u8> {
     c
 }
 
-/// Colour data: the strip's LEDs, then each fan port's 34-LED group. `colors[0]` is the
-/// strip, `colors[1..=6]` the ports; unset channels are dark.
-pub fn frame(strip_leds: u16, colors: &[Option<Rgb>; PORTS + 1]) -> Vec<u8> {
-    let mut d = Vec::with_capacity((strip_leds as usize + PORTS * PORT_SLOTS) * 3);
-    let fill = |d: &mut Vec<u8>, n: usize, c: Option<Rgb>| {
-        let c = c.unwrap_or(Rgb::BLACK);
-        d.extend((0..n).flat_map(|_| [c.0, c.1, c.2]));
+fn animated(e: &Effect) -> bool {
+    matches!(e.kind, Kind::Breathing | Kind::ColorCycle | Kind::Rainbow | Kind::Wave)
+}
+
+/// Seconds per cycle of an effect.
+fn period(e: &Effect) -> f32 {
+    let (slow, normal, fast) = match e.kind {
+        Kind::Breathing => (6.0, 4.0, 2.0),
+        _ => (12.0, 6.0, 3.0),
     };
-    fill(&mut d, strip_leds as usize, colors[0]);
-    for c in &colors[1..] {
-        fill(&mut d, PORT_SLOTS, *c);
+    match e.speed {
+        Speed::Slow => slow,
+        Speed::Normal => normal,
+        Speed::Fast => fast,
+    }
+}
+
+/// Colour of LED `led` of `n` on channel `ch` at time `t` seconds.
+pub fn led_color(e: &Effect, ch: usize, led: usize, n: usize, t: f32) -> Rgb {
+    let phase = t / period(e);
+    let c = match e.kind {
+        Kind::Off => Rgb::BLACK,
+        Kind::Static => e.colors[0],
+        Kind::Breathing => {
+            // Fade in and out; every other breath in the second colour.
+            let level = 0.5 - 0.5 * (phase.fract() * TAU).cos();
+            e.colors[(phase as u64 % 2) as usize].dimmed(level)
+        }
+        Kind::ColorCycle => Rgb::hue(phase),
+        Kind::Rainbow => Rgb::hue(phase + led as f32 / n.max(1) as f32),
+        // One rainbow running across all channels, a fan's worth of hues per channel.
+        Kind::Wave => Rgb::hue(phase - (ch as f32 + led as f32 / n.max(1) as f32) / CHANNELS as f32),
+    };
+    c.scaled(e.brightness)
+}
+
+/// Colour data at time `t`: the strip's LEDs, then each fan port's 34-LED group. `leds[k]` is
+/// channel k's real LED count; unset channels are dark.
+pub fn render(leds: &[u16; CHANNELS], fx: &[Option<Effect>; CHANNELS], t: f32) -> Vec<u8> {
+    let mut d = Vec::with_capacity((leds[0] as usize + PORTS * PORT_SLOTS) * 3);
+    for ch in 0..CHANNELS {
+        let slots = if ch == 0 { leds[0] as usize } else { PORT_SLOTS };
+        let n = if leds[ch] > 0 { leds[ch] as usize } else { slots };
+        for led in 0..slots {
+            let c = fx[ch].map_or(Rgb::BLACK, |e| led_color(&e, ch, led % n.max(1), n, t));
+            d.extend_from_slice(&[c.0, c.1, c.2]);
+        }
     }
     d
 }
 
+/// What the engine asks for, shared with the worker thread.
+#[derive(Default)]
+struct Shared {
+    fx: [Option<Effect>; CHANNELS],
+    stop: bool,
+    /// Why the last frame couldn't be sent, if it couldn't.
+    error: Option<String>,
+}
+
+type SharedState = Arc<(Mutex<Shared>, Condvar)>;
+
 pub struct CommanderCore {
-    path: Vec<u16>,
-    hid: Option<Hid>,
     zones: Vec<LightZone>,
     /// Channel (0 = strip, 1-6 = port) of each zone.
     channel: Vec<usize>,
-    strip_leds: u16,
-    colors: [Option<Rgb>; PORTS + 1],
-    last_sent: Option<Instant>,
-    /// Software mode is set up and the colour endpoint is open on handle 0.
-    ready: bool,
-    owner_checked: Option<Instant>,
-    owner: Option<String>,
+    shared: SharedState,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl CommanderCore {
@@ -147,17 +195,20 @@ impl CommanderCore {
         // Reading the ports needs software mode; go back to sleep right after.
         cmd(&hid, &WAKE)?;
         let fans = read(&hid, 0x1a);
-        let leds = read(&hid, 0x20);
+        let leds_reply = read(&hid, 0x20);
         let _ = cmd(&hid, &SLEEP);
         if fans_connected(&fans?) {
             return Err("Commander Core XT has fans connected; fan-lite leaves it to its own control".into());
         }
         let mut zones = Vec::new();
         let mut channel = Vec::new();
-        let mut strip_leds = 0;
-        for (ch, leds) in parse_leds(&leds?).into_iter().filter(|&(ch, n)| n > 0 && ch <= PORTS) {
+        let mut leds = [0u16; CHANNELS];
+        for (ch, n) in parse_leds(&leds_reply?)
+            .into_iter()
+            .filter(|&(ch, n)| n > 0 && ch < CHANNELS)
+        {
+            leds[ch] = n;
             let (id, label) = if ch == 0 {
-                strip_leds = leds;
                 ("corsair/strip".to_owned(), "Corsair LED strip".to_owned())
             } else {
                 (format!("corsair/port{ch}"), format!("Corsair port {ch}"))
@@ -165,95 +216,118 @@ impl CommanderCore {
             zones.push(LightZone {
                 id,
                 label,
-                leds,
-                kinds: vec![Kind::Off, Kind::Static],
+                leds: n,
+                kinds: Kind::ALL.to_vec(),
             });
             channel.push(ch);
         }
         if zones.is_empty() {
             return Ok(None);
         }
+        let shared: SharedState = Arc::default();
+        let state = shared.clone();
+        let path = dev.path;
+        let worker = std::thread::Builder::new()
+            .name("corsair-lighting".into())
+            .spawn(move || worker(path, hid, leds, state))
+            .map_err(|e| HwError(e.to_string()))?;
         Ok(Some(CommanderCore {
-            path: dev.path,
-            hid: Some(hid),
             zones,
             channel,
-            strip_leds,
-            colors: [None; PORTS + 1],
-            last_sent: None,
-            ready: false,
-            owner_checked: None,
-            owner: None,
+            shared,
+            worker: Some(worker),
         }))
     }
+}
 
-    fn device(&mut self) -> Result<&Hid, HwError> {
-        if self.owner_checked.is_none_or(|t| t.elapsed() >= OWNER_RECHECK) {
-            self.owner_checked = Some(Instant::now());
-            self.owner = process_running(OWNER);
-        }
-        if let Some(o) = &self.owner {
-            self.ready = false;
-            return Err(HwError(format!(
-                "{o} controls the Corsair hub - close iCUE to use fan-lite"
-            )));
-        }
-        if self.hid.is_none() {
-            self.hid = Some(Hid::open(&self.path, REPORT, "Corsair Commander Core XT")?);
-            self.ready = false;
-        }
-        Ok(self.hid.as_ref().unwrap())
+/// Software mode, port grouping, strip length, then the colour endpoint on handle 0.
+fn setup(h: &Hid, strip_leds: u16) -> Result<(), HwError> {
+    cmd(h, &WAKE)?;
+    for handle in 0..3 {
+        let _ = cmd(h, &[0x05, 0x01, handle]); // whatever was left open
     }
-
-    /// Software mode, port grouping, strip length, then the colour endpoint on handle 0.
-    fn setup(h: &Hid, strip_leds: u16) -> Result<(), HwError> {
-        cmd(h, &WAKE)?;
-        for handle in 0..3 {
-            let _ = cmd(h, &[0x05, 0x01, handle]); // whatever was left open
-        }
-        cmd(h, &[0x0d, 0x01, 0x1e])?;
-        for p in write_packets(0x01, 0x0d, &port_config(), REPORT) {
-            cmd(h, &p)?;
-        }
-        cmd(h, &[0x0d, 0x02, 0x1d])?;
-        // Same 15-byte size as the port grouping; a shorter payload shifts the colour data.
-        let mut strip = [0u8; 15];
-        strip[..3].copy_from_slice(&[0x07, strip_leds as u8, (strip_leds >> 8) as u8]);
-        for p in write_packets(0x02, 0x0c, &strip, REPORT) {
-            cmd(h, &p)?;
-        }
-        cmd(h, &[0x05, 0x01, 0x02])?;
-        cmd(h, &[0x05, 0x01, 0x01])?;
-        cmd(h, &CONFIRM)?;
-        cmd(h, &[0x0d, 0x00, 0x22]).map(|_| ())
+    cmd(h, &[0x0d, 0x01, 0x1e])?;
+    for p in write_packets(0x01, 0x0d, &port_config(), REPORT) {
+        cmd(h, &p)?;
     }
+    cmd(h, &[0x0d, 0x02, 0x1d])?;
+    // Same 15-byte size as the port grouping; a shorter payload shifts the colour data.
+    let mut strip = [0u8; 15];
+    strip[..3].copy_from_slice(&[0x07, strip_leds as u8, (strip_leds >> 8) as u8]);
+    for p in write_packets(0x02, 0x0c, &strip, REPORT) {
+        cmd(h, &p)?;
+    }
+    cmd(h, &[0x05, 0x01, 0x02])?;
+    cmd(h, &[0x05, 0x01, 0x01])?;
+    cmd(h, &CONFIRM)?;
+    cmd(h, &[0x0d, 0x00, 0x22]).map(|_| ())
+}
 
-    /// Send the current colours (setting the hub up first if needed).
-    fn send(&mut self) -> Result<(), HwError> {
-        if self.colors.iter().all(Option::is_none) {
-            return Ok(());
-        }
-        let data = frame(self.strip_leds, &self.colors);
-        let (ready, strip) = (self.ready, self.strip_leds);
-        let r = self.device().and_then(|h| {
-            if !ready {
-                Self::setup(h, strip)?;
+/// The lighting thread: idle until an effect is set, then keep the hub in software mode and
+/// send frames until told to stop, then hand the hub back to its own lighting.
+fn worker(path: Vec<u16>, hid: Hid, leds: [u16; CHANNELS], state: SharedState) {
+    let (lock, cv) = &*state;
+    let mut hid = Some(hid);
+    let mut ready = false;
+    let start = Instant::now();
+    // Looking for iCUE walks the process list: not on every frame.
+    let mut owner_checked: Option<Instant> = None;
+    let mut owner = None;
+    loop {
+        let fx = {
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !s.stop && s.fx.iter().all(Option::is_none) {
+                s = cv.wait(s).unwrap_or_else(|e| e.into_inner());
             }
+            if s.stop {
+                break;
+            }
+            s.fx
+        };
+        if owner_checked.is_none_or(|t| t.elapsed() >= RETRY) {
+            owner_checked = Some(Instant::now());
+            owner = process_running(OWNER);
+        }
+        let r = (|| {
+            if let Some(o) = &owner {
+                return Err(HwError(format!(
+                    "{o} controls the Corsair hub - close iCUE to use fan-lite"
+                )));
+            }
+            if hid.is_none() {
+                hid = Some(Hid::open(&path, REPORT, "Corsair Commander Core XT")?);
+            }
+            let h = hid.as_ref().unwrap();
+            if !ready {
+                setup(h, leds[0])?;
+                ready = true;
+            }
+            let data = render(&leds, &fx, start.elapsed().as_secs_f32());
             write_packets(0x00, 0x12, &data, REPORT)
                 .iter()
                 .try_for_each(|p| cmd(h, p).map(|_| ()))
-        });
-        match &r {
-            Ok(()) => {
-                self.ready = true;
-                self.last_sent = Some(Instant::now());
+        })();
+        let (error, wait) = match r {
+            Ok(()) if fx.iter().flatten().any(animated) => (None, FRAME),
+            Ok(()) => (None, KEEPALIVE),
+            Err(e) => {
+                // Re-open and set up again next time.
+                hid = None;
+                ready = false;
+                (Some(e.to_string()), RETRY)
             }
-            Err(_) => {
-                self.hid = None; // re-open and set up again next time
-                self.ready = false;
-            }
+        };
+        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+        s.error = error;
+        if !s.stop {
+            // Wakes early when the engine sets a new effect.
+            s = cv.wait_timeout(s, wait).unwrap_or_else(|e| e.into_inner()).0;
         }
-        r
+        drop(s);
+    }
+    if ready && let Some(h) = &hid {
+        let _ = cmd(h, &CLOSE);
+        let _ = cmd(h, &SLEEP);
     }
 }
 
@@ -294,14 +368,7 @@ impl Backend for CommanderCore {
     fn controls(&self) -> &[ControlChannel] {
         &[]
     }
-
-    /// Keepalive: re-send the colours before the hub drops out of software mode, and retry
-    /// after a failure (e.g. once iCUE has been closed).
-    fn update(&mut self, _: &mut [Option<f32>], _: &mut [Option<f32>], _: &mut [Option<f32>]) {
-        if self.last_sent.is_none_or(|t| t.elapsed() >= KEEPALIVE) {
-            let _ = self.send();
-        }
-    }
+    fn update(&mut self, _: &mut [Option<f32>], _: &mut [Option<f32>], _: &mut [Option<f32>]) {}
     fn set_duty(&mut self, _: usize, _: f32) -> Result<(), HwError> {
         Err("no fan outputs".into())
     }
@@ -313,12 +380,16 @@ impl Backend for CommanderCore {
         &self.zones
     }
 
+    /// Hand the effect to the lighting thread. Reports the thread's last error, if any.
     fn set_light(&mut self, i: usize, e: &Effect) -> Result<(), HwError> {
-        self.colors[self.channel[i]] = Some(match e.kind {
-            Kind::Off => Rgb::BLACK,
-            _ => e.colors[0].scaled(e.brightness),
-        });
-        self.send()
+        let (lock, cv) = &*self.shared;
+        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+        s.fx[self.channel[i]] = Some(*e);
+        cv.notify_all();
+        match &s.error {
+            Some(err) => Err(HwError(err.clone())),
+            None => Ok(()),
+        }
     }
 
     fn save_lights(&mut self) -> Result<(), HwError> {
@@ -327,13 +398,13 @@ impl Backend for CommanderCore {
 }
 
 impl Drop for CommanderCore {
-    /// Back to the hub's own lighting.
+    /// Stop the lighting thread, which hands the hub back to its own lighting.
     fn drop(&mut self) {
-        if self.ready
-            && let Some(h) = &self.hid
-        {
-            let _ = cmd(h, &CLOSE);
-            let _ = cmd(h, &SLEEP);
+        let (lock, cv) = &*self.shared;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        cv.notify_all();
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
         }
     }
 }
@@ -370,11 +441,20 @@ mod tests {
         assert_eq!(&p[0][..8], &[0x06, 0x01, 17, 0, 0, 0, 0x0d, 0x00]);
     }
 
+    fn fx(kind: Kind) -> Effect {
+        Effect {
+            kind,
+            colors: [Rgb(1, 2, 3), Rgb(9, 9, 9)],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn colour_frame_layout() {
-        let mut colors = [None; PORTS + 1];
-        colors[2] = Some(Rgb(1, 2, 3));
-        let f = frame(10, &colors);
+    fn frame_layout() {
+        let mut effects = [None; CHANNELS];
+        effects[2] = Some(fx(Kind::Static));
+        let leds = [10, 16, 16, 0, 0, 0, 0];
+        let f = render(&leds, &effects, 0.0);
         assert_eq!(f.len(), (10 + PORTS * PORT_SLOTS) * 3);
         // Port 2 starts after the strip's 10 LEDs and port 1's 34-LED group.
         let o = (10 + PORT_SLOTS) * 3;
@@ -384,8 +464,34 @@ mod tests {
     }
 
     #[test]
+    fn effects_animate() {
+        // Breathing: dark at the start of a breath, full halfway, second colour next breath.
+        let b = fx(Kind::Breathing);
+        let p = period(&b);
+        assert_eq!(led_color(&b, 1, 0, 16, 0.0), Rgb::BLACK);
+        assert_eq!(led_color(&b, 1, 0, 16, p / 2.0), Rgb(1, 2, 3));
+        assert_eq!(led_color(&b, 1, 0, 16, p * 1.5), Rgb(9, 9, 9));
+        // Rainbow spreads the hues over a fan's LEDs; colour cycle doesn't.
+        let r = fx(Kind::Rainbow);
+        assert_ne!(led_color(&r, 1, 0, 16, 0.0), led_color(&r, 1, 8, 16, 0.0));
+        let c = fx(Kind::ColorCycle);
+        assert_eq!(led_color(&c, 1, 0, 16, 1.0), led_color(&c, 1, 8, 16, 1.0));
+        assert_ne!(led_color(&c, 1, 0, 16, 0.0), led_color(&c, 1, 0, 16, 1.0));
+        // Wave differs between channels at the same LED.
+        let w = fx(Kind::Wave);
+        assert_ne!(led_color(&w, 1, 0, 16, 0.0), led_color(&w, 2, 0, 16, 0.0));
+        // Brightness applies to every effect.
+        let dim = Effect {
+            brightness: 0,
+            ..fx(Kind::Rainbow)
+        };
+        assert_eq!(led_color(&dim, 1, 3, 16, 2.0), Rgb::BLACK);
+        assert!(!animated(&fx(Kind::Static)) && animated(&fx(Kind::Wave)));
+    }
+
+    #[test]
     fn colour_write_packets() {
-        let data = frame(0, &[Some(Rgb(9, 9, 9)); PORTS + 1]);
+        let data = render(&[0; CHANNELS], &[Some(fx(Kind::Static)); CHANNELS], 0.0);
         let p = write_packets(0x00, 0x12, &data, REPORT);
         let len = (data.len() + 2) as u32;
         let mut head = vec![0x06, 0x00];
@@ -419,33 +525,22 @@ mod live {
         }
     }
 
-    /// Through the driver: zone k gets green, blue, white, yellow, cyan, magenta for 20 s with
-    /// keepalives, then the hub goes back to its own lighting.
-    /// `cargo test --lib corsair_driver_live -- --ignored --nocapture`
+    /// Through the driver: 10 s rainbow, 10 s wave, 10 s breathing, then the hub goes back to
+    /// its own lighting. `cargo test --lib corsair_driver_live -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn corsair_driver_live() {
         let mut c = CommanderCore::detect().unwrap().expect("no hub");
-        let palette = [
-            Rgb(0, 255, 0),
-            Rgb(0, 0, 255),
-            Rgb(255, 255, 255),
-            Rgb(255, 200, 0),
-            Rgb(0, 255, 255),
-            Rgb(255, 0, 255),
-        ];
-        for i in 0..c.lights().len() {
+        for kind in [Kind::Rainbow, Kind::Wave, Kind::Breathing] {
             let e = Effect {
-                kind: Kind::Static,
-                colors: [palette[i % palette.len()]; 2],
+                kind,
                 ..Default::default()
             };
-            let r = c.set_light(i, &e);
-            println!("{}: {r:?}", c.lights()[i].id);
-        }
-        for _ in 0..20 {
-            std::thread::sleep(Duration::from_secs(1));
-            c.update(&mut [], &mut [], &mut []);
+            for i in 0..c.lights().len() {
+                let _ = c.set_light(i, &e);
+            }
+            std::thread::sleep(Duration::from_secs(10));
+            println!("{kind:?}: {:?}", c.set_light(0, &e));
         }
         drop(c);
         println!("back to the hub's own lighting");

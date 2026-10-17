@@ -175,7 +175,7 @@ impl App {
 
     /// Tray hover text: one line per visible fan with its speed, then the CPU temperature.
     fn tray_tip(&self, snap: &Snapshot) -> String {
-        let mut tip = String::from("fan-lite");
+        let mut tip = String::from("FanLite");
         if snap.emergency {
             tip += "\nEMERGENCY: fans at 100%";
         }
@@ -268,7 +268,7 @@ impl App {
         }
     }
 
-    /// Extra title-bar items after "fan-lite": engine state and the notices toggle.
+    /// Extra title-bar items after "FanLite": engine state and the notices toggle.
     fn title_extra(&mut self, ui: &mut egui::Ui, snap: &Snapshot) {
         if !self.engine.alive() {
             ui.label(RichText::new("engine stopped").font(theme::sans(12.0)).color(RED));

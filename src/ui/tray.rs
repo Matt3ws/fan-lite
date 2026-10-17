@@ -129,7 +129,7 @@ impl Tray {
             icon,
             tip: String::new(),
         };
-        tray.write_tip("fan-lite");
+        tray.write_tip("FanLite");
         let w = wide("TaskbarCreated");
         TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w.as_ptr()) }, Ordering::Relaxed);
         if !tray.add() {

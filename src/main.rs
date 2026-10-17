@@ -35,7 +35,7 @@ fn main() {
     let (cfg, cfg_errors) = Config::load();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("fan-lite")
+            .with_title("FanLite")
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -59,8 +59,8 @@ const INSTANCE_MUTEX: &str = "Local\\fan-lite.instance";
 
 fn already_running() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-    let text = hw::win::wide("fan-lite is already running. Find it in the notification area by the clock.");
-    let title = hw::win::wide("fan-lite");
+    let text = hw::win::wide("FanLite is already running. Find it in the notification area by the clock.");
+    let title = hw::win::wide("FanLite");
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),

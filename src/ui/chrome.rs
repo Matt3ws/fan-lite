@@ -57,7 +57,7 @@ pub fn window(
         let title = ui.painter().text(
             rect.min + vec2(TITLE_X, ROW_Y),
             Align2::LEFT_CENTER,
-            "fan-lite",
+            "FanLite",
             theme::sans_semi(13.0),
             TEXT,
         );

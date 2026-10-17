@@ -1,6 +1,6 @@
 [package]
 name = "fan-lite"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Minimal, low-overhead fan controller for Windows (egui)"
 license = "MIT"

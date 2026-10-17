@@ -190,6 +190,22 @@ pub fn clean_up(exe: &Path) {
     let _ = std::fs::remove_dir_all(work_dir());
 }
 
+/// [`clean_up`] right after an update, on a background thread: the old process has released
+/// the instance lock but Windows can keep its exe locked for a moment while it exits, so keep
+/// trying for a few seconds.
+pub fn clean_up_after_update(exe: PathBuf) {
+    std::thread::spawn(move || {
+        let old = exe.with_file_name(OLD);
+        for _ in 0..50 {
+            clean_up(&exe);
+            if !old.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,7 +19,7 @@ fn main() {
         return;
     };
     if let Ok(exe) = std::env::current_exe() {
-        fan_lite::update::clean_up(&exe);
+        fan_lite::update::clean_up_after_update(exe);
     }
     if std::env::args().any(|a| a == "--listen-test") {
         // Diagnostic: drive one fan group at a time so the user can hear which is loud.

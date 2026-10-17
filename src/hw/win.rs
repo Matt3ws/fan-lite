@@ -1,12 +1,18 @@
-//! Thin Win32 helpers: global named mutexes, dynamic library loading, elevation check.
+//! Thin Win32 helpers: global named mutexes, dynamic library loading, process lookup,
+//! elevation check.
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_ABANDONED, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Security::{
     GetTokenInformation, InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
     SetSecurityDescriptorDacl, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -108,6 +114,32 @@ impl Library {
         debug_assert_eq!(size_of::<F>(), size_of::<usize>());
         let p = unsafe { GetProcAddress(self.0, name.as_ptr()) }?;
         Some(unsafe { std::mem::transmute_copy(&p) })
+    }
+}
+
+/// The first running process whose exe name starts with one of `prefixes` (lower case,
+/// e.g. `"nzxt cam"`), if any. Used to back off while a vendor tool owns a device.
+pub fn process_running(prefixes: &[&str]) -> Option<String> {
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = None;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok && found.is_none() {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name = String::from_utf16_lossy(&e.szExeFile[..len]);
+            let lower = name.to_ascii_lowercase();
+            if prefixes.iter().any(|p| lower.starts_with(p)) {
+                found = Some(name);
+            }
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+        found
     }
 }
 

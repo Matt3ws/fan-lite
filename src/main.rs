@@ -90,6 +90,17 @@ fn probe() {
                 c.hw_min_pct
             );
         }
+        for z in b.lights() {
+            let kinds: Vec<&str> = z.kinds.iter().map(|k| k.name()).collect();
+            let _ = writeln!(
+                out,
+                "  light {:<28} {:<18} {} LEDs ({})",
+                z.label,
+                z.id,
+                z.leds,
+                kinds.join(", ")
+            );
+        }
     }
     print!("{out}");
     if let Some(p) = Config::path().map(|p| p.with_file_name("probe.txt")) {

@@ -6,29 +6,10 @@
 //! evaluates speed *curves* itself against its liquid temperature (20..=59 °C), so a fixed
 //! duty is sent as a flat curve. Only one program may talk to it at a time (not with NZXT CAM).
 
-use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA, SetupDiDestroyDeviceInfoList,
-    SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-};
-use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-    HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
-};
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_OBJECT_0,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
-};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-};
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
-
+use super::hid::{self, Hid};
+use super::win::process_running;
 use super::{Backend, Channel, ControlChannel, HwError};
 
 const VID: &str = "vid_1e71";
@@ -42,7 +23,6 @@ const MODELS: [(&str, &str); 3] = [
 const HID_INTERFACE: &str = "mi_01";
 const REPORT: usize = 64;
 const READ_TIMEOUT_MS: u32 = 150;
-const WRITE_TIMEOUT_MS: u32 = 500;
 const MAX_READS: usize = 12;
 /// The firmware can lock up or drop changes if curves arrive too fast.
 const MIN_CURVE_GAP: Duration = Duration::from_millis(250);
@@ -141,204 +121,29 @@ pub fn liquid_curve(chan: Chan, points: &[(f32, f32)]) -> [u8; 40] {
 
 /// True if NZXT CAM is running: it owns the device and would fight over it.
 fn cam_running() -> bool {
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap == INVALID_HANDLE_VALUE {
-            return false;
-        }
-        let mut e: PROCESSENTRY32W = std::mem::zeroed();
-        e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-        let mut found = false;
-        let mut ok = Process32FirstW(snap, &mut e) != 0;
-        while ok && !found {
-            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
-            let name = String::from_utf16_lossy(&e.szExeFile[..len]).to_ascii_lowercase();
-            found = name.starts_with("nzxt cam");
-            ok = Process32NextW(snap, &mut e) != 0;
-        }
-        CloseHandle(snap);
-        found
-    }
+    process_running(&["nzxt cam"]).is_some()
 }
 
 /// Device path and model name of the first supported Kraken's control interface.
 fn find_device() -> Option<(Vec<u16>, &'static str)> {
-    unsafe {
-        let mut guid = std::mem::zeroed();
-        HidD_GetHidGuid(&mut guid);
-        let set = SetupDiGetClassDevsW(&guid, null(), null_mut(), DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if set as isize == -1 {
-            return None;
-        }
-        let mut found = None;
-        let mut idx = 0;
-        loop {
-            let mut iface: SP_DEVICE_INTERFACE_DATA = std::mem::zeroed();
-            iface.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
-            if SetupDiEnumDeviceInterfaces(set, null(), &guid, idx, &mut iface) == 0 {
-                break;
-            }
-            idx += 1;
-            let mut need = 0u32;
-            SetupDiGetDeviceInterfaceDetailW(set, &iface, null_mut(), 0, &mut need, null_mut());
-            if need < 8 {
-                continue;
-            }
-            // SP_DEVICE_INTERFACE_DETAIL_DATA_W: u32 cbSize (8 on x64) then a UTF-16 path.
-            let mut buf = vec![0u32; (need as usize).div_ceil(4)];
-            buf[0] = if cfg!(target_pointer_width = "64") { 8 } else { 6 };
-            if SetupDiGetDeviceInterfaceDetailW(set, &iface, buf.as_mut_ptr().cast(), need, null_mut(), null_mut()) == 0
-            {
-                continue;
-            }
-            let wide = std::slice::from_raw_parts(buf.as_ptr().cast::<u16>().add(2), (need as usize - 4) / 2);
-            let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-            let path = String::from_utf16_lossy(&wide[..len]).to_ascii_lowercase();
-            if !path.contains(VID) || !path.contains(HID_INTERFACE) {
-                continue;
-            }
-            if let Some(&(_, model)) = MODELS.iter().find(|(pid, _)| path.contains(pid)) {
-                let mut w = wide[..len].to_vec();
-                w.push(0);
-                found = Some((w, model));
-                break;
-            }
-        }
-        SetupDiDestroyDeviceInfoList(set);
-        found
-    }
+    hid::find(VID, Some(HID_INTERFACE)).into_iter().find_map(|d| {
+        MODELS
+            .iter()
+            .find(|(pid, _)| d.lower.contains(pid))
+            .map(|&(_, model)| (d.path, model))
+    })
 }
 
-/// An open HID handle with overlapped I/O, so a stuck device can never block the engine.
-struct Hid {
-    h: HANDLE,
-    ev: HANDLE,
-    in_len: usize,
-    out_len: usize,
+fn open(path: &[u16]) -> Result<Hid, HwError> {
+    let hid = Hid::open(path, REPORT, "Kraken")?;
+    hid.flush();
+    hid.write(&[0x70, 0x02, 0x01, 0xB8, 0x01])?;
+    hid.write(&[0x70, 0x01])?;
+    Ok(hid)
 }
 
-impl Hid {
-    fn open(path: &[u16]) -> Result<Self, HwError> {
-        unsafe {
-            let h = CreateFileW(
-                path.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                null_mut(),
-            );
-            if h == INVALID_HANDLE_VALUE {
-                return Err(HwError(format!("cannot open the Kraken (error {})", GetLastError())));
-            }
-            let ev = CreateEventW(null(), 1, 0, null());
-            let mut hid = Hid {
-                h,
-                ev,
-                in_len: REPORT,
-                out_len: REPORT,
-            };
-            let mut pre = 0;
-            if HidD_GetPreparsedData(h, &mut pre) {
-                let mut caps: HIDP_CAPS = std::mem::zeroed();
-                if HidP_GetCaps(pre, &mut caps) == HIDP_STATUS_SUCCESS {
-                    hid.in_len = (caps.InputReportByteLength as usize).max(REPORT);
-                    hid.out_len = (caps.OutputReportByteLength as usize).max(REPORT);
-                }
-                HidD_FreePreparsedData(pre);
-            }
-            Ok(hid)
-        }
-    }
-
-    /// Run one overlapped transfer, giving up (and cancelling) after `timeout_ms`.
-    unsafe fn transfer(&self, write: bool, buf: *mut u8, len: usize, timeout_ms: u32) -> Option<usize> {
-        unsafe {
-            ResetEvent(self.ev);
-            let mut ov: OVERLAPPED = std::mem::zeroed();
-            ov.hEvent = self.ev;
-            let ok = if write {
-                WriteFile(self.h, buf, len as u32, null_mut(), &mut ov)
-            } else {
-                ReadFile(self.h, buf, len as u32, null_mut(), &mut ov)
-            };
-            if ok == 0 && GetLastError() != ERROR_IO_PENDING {
-                return None;
-            }
-            let mut n = 0u32;
-            if WaitForSingleObject(self.ev, timeout_ms) == WAIT_OBJECT_0 {
-                (GetOverlappedResult(self.h, &ov, &mut n, 0) != 0).then_some(n as usize)
-            } else {
-                // Cancel and wait for the cancellation, so `ov`/`buf` outlive the operation.
-                CancelIoEx(self.h, &ov);
-                GetOverlappedResult(self.h, &ov, &mut n, 1);
-                None
-            }
-        }
-    }
-
-    fn write(&self, report: &[u8; REPORT]) -> Result<(), HwError> {
-        let mut buf = vec![0u8; self.out_len];
-        buf[..REPORT].copy_from_slice(report);
-        match unsafe { self.transfer(true, buf.as_mut_ptr(), buf.len(), WRITE_TIMEOUT_MS) } {
-            Some(_) => Ok(()),
-            None => Err("writing to the Kraken failed or timed out".into()),
-        }
-    }
-
-    fn read(&self, timeout_ms: u32) -> Option<Vec<u8>> {
-        let mut buf = vec![0u8; self.in_len];
-        let n = unsafe { self.transfer(false, buf.as_mut_ptr(), buf.len(), timeout_ms) }?;
-        buf.truncate(n);
-        Some(buf)
-    }
-
-    /// Drop queued input reports so the next read is a reply to our next request.
-    fn flush(&self) {
-        for _ in 0..16 {
-            if self.read(0).is_none() {
-                break;
-            }
-        }
-    }
-
-    fn init(&self) -> Result<(), HwError> {
-        self.flush();
-        let mut a = [0u8; REPORT];
-        a[..5].copy_from_slice(&[0x70, 0x02, 0x01, 0xB8, 0x01]);
-        self.write(&a)?;
-        let mut b = [0u8; REPORT];
-        b[..2].copy_from_slice(&[0x70, 0x01]);
-        self.write(&b)
-    }
-
-    fn status(&self) -> Result<Status, HwError> {
-        self.flush();
-        let mut req = [0u8; REPORT];
-        req[..2].copy_from_slice(&[0x74, 0x01]);
-        self.write(&req)?;
-        for _ in 0..MAX_READS {
-            match self.read(READ_TIMEOUT_MS) {
-                Some(r) => {
-                    if let Some(s) = parse_status(&r) {
-                        return Ok(s);
-                    }
-                }
-                None => break,
-            }
-        }
-        Err("no status reply from the Kraken".into())
-    }
-}
-
-impl Drop for Hid {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.h);
-            CloseHandle(self.ev);
-        }
-    }
+fn status(hid: &Hid) -> Result<Status, HwError> {
+    hid.request(&[0x74, 0x01], READ_TIMEOUT_MS, MAX_READS, parse_status)
 }
 
 pub struct Kraken {
@@ -370,9 +175,8 @@ impl Kraken {
                 "{model} found, but NZXT CAM is running - close it to let fan-lite control it"
             )));
         }
-        let hid = Hid::open(&path)?;
-        hid.init()?;
-        hid.status()?;
+        let hid = open(&path)?;
+        status(&hid)?;
         Ok(Kraken {
             path,
             model,
@@ -427,8 +231,7 @@ impl Kraken {
             return Err("NZXT CAM is running - close it to let fan-lite control the Kraken".into());
         }
         if self.hid.is_none() {
-            let hid = Hid::open(&self.path)?;
-            hid.init()?;
+            let hid = open(&self.path)?;
             self.hid = Some(hid);
         }
         Ok(self.hid.as_ref().unwrap())
@@ -469,7 +272,7 @@ impl Backend for Kraken {
         temps.fill(None);
         fans.fill(None);
         duty.fill(None);
-        let status = self.device().and_then(|h| h.status());
+        let status = self.device().and_then(status);
         match status {
             Ok(s) => {
                 temps[0] = s.liquid;
@@ -574,5 +377,23 @@ mod tests {
         let pump = liquid_curve(Chan::Pump, &PUMP_RELEASE);
         assert_eq!(pump[10], 40, "30 °C liquid -> 40 %");
         assert_eq!(pump[25], 100, "45 °C liquid -> 100 %");
+    }
+
+    /// Read-only: firmware info and the lighting-accessory list, as hex.
+    /// `cargo test --lib kraken_rgb_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn kraken_rgb_probe() {
+        let (path, model) = find_device().expect("no Kraken");
+        let hid = open(&path).unwrap();
+        let hexs = |r: &[u8]| r.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        println!("{model}");
+        for (req, want) in [([0x10u8, 0x01], [0x11u8, 0x01]), ([0x20, 0x03], [0x21, 0x03])] {
+            let r = hid.request(&req, 300, 12, |r| (r.len() > 2 && r[..2] == want).then(|| r.to_vec()));
+            match r {
+                Ok(r) => println!("{:02x?} -> {}", req, hexs(&r)),
+                Err(e) => println!("{:02x?} -> {e}", req),
+            }
+        }
     }
 }

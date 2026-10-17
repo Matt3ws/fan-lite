@@ -5,4 +5,5 @@ pub mod control;
 pub mod engine;
 pub mod hw;
 pub mod listen;
+pub mod rgb;
 pub mod ui;

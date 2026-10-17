@@ -8,10 +8,15 @@
 //! label nct/pwm2 "CPU fan"
 //! curve "CPU" sensor=amd/tctl hyst=3 points=40:25,60:40,75:70,85:100
 //! fan nct/pwm2 mode=curve:"CPU" min=25 up=50 down=10
+//! light sync kind=static c1=#f2c94c c2=#1e3cff speed=normal bri=100
+//! light zone aura/argb1 kind=wave c1=#f2c94c c2=#1e3cff speed=slow bri=80
+//! light leave gpu/0
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::rgb::Effect;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Curve {
@@ -214,6 +219,35 @@ impl FanSettings {
     }
 }
 
+/// What a lighting zone shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ZoneLight {
+    /// Its own effect instead of the synced one.
+    Own(Effect),
+    /// fan-lite never writes to it (another program or the firmware keeps it).
+    Leave,
+}
+
+/// RGB lighting. With `sync` unset and no zone settings, fan-lite never touches any lights.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Lighting {
+    /// One effect for every zone that has no setting of its own; `None` = leave them alone.
+    pub sync: Option<Effect>,
+    /// Per zone id, overriding `sync`.
+    pub zones: BTreeMap<String, ZoneLight>,
+}
+
+impl Lighting {
+    /// The effect zone `id` should show, or `None` to leave it alone.
+    pub fn wanted(&self, id: &str) -> Option<Effect> {
+        match self.zones.get(id) {
+            Some(ZoneLight::Own(e)) => Some(*e),
+            Some(ZoneLight::Leave) => None,
+            None => self.sync,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub interval_ms: u32,
@@ -232,6 +266,7 @@ pub struct Config {
     /// Display order of the fan list (control ids, set by dragging). Fans not listed keep
     /// their detection order after the listed ones.
     pub fan_order: Vec<String>,
+    pub lighting: Lighting,
 }
 
 impl Default for Config {
@@ -247,6 +282,7 @@ impl Default for Config {
             fans: Vec::new(),
             calibrations: BTreeMap::new(),
             fan_order: Vec::new(),
+            lighting: Lighting::default(),
         }
     }
 }
@@ -354,6 +390,15 @@ impl Config {
                 "fan {} mode={mode} min={} up={} down={}\n",
                 f.id, f.min_pct, f.ramp_up, f.ramp_down
             );
+        }
+        if let Some(e) = &self.lighting.sync {
+            s += &format!("light sync {}\n", e.to_kv());
+        }
+        for (id, z) in &self.lighting.zones {
+            match z {
+                ZoneLight::Own(e) => s += &format!("light zone {id} {}\n", e.to_kv()),
+                ZoneLight::Leave => s += &format!("light leave {id}\n"),
+            }
         }
         s
     }
@@ -529,6 +574,28 @@ fn parse_line(cfg: &mut Config, line: &str) -> Result<(), String> {
             cfg.fans.retain(|x| x.id != f.id);
             cfg.fans.push(f);
         }
+        "light" => {
+            let effect = |kv: &[String]| -> Result<Effect, String> {
+                let mut e = Effect::default();
+                for a in kv {
+                    let (k, v) = a
+                        .split_once('=')
+                        .ok_or_else(|| format!("expected key=value, got '{a}'"))?;
+                    e.set_kv(k, v)?;
+                }
+                Ok(e)
+            };
+            match args {
+                [what, kv @ ..] if what == "sync" => cfg.lighting.sync = Some(effect(kv)?),
+                [what, id, kv @ ..] if what == "zone" => {
+                    cfg.lighting.zones.insert(id.clone(), ZoneLight::Own(effect(kv)?));
+                }
+                [what, id] if what == "leave" => {
+                    cfg.lighting.zones.insert(id.clone(), ZoneLight::Leave);
+                }
+                _ => return Err("light: expected 'sync …', 'zone <id> …' or 'leave <id>'".into()),
+            }
+        }
         _ => return Err(format!("unknown setting '{key}'")),
     }
     Ok(())
@@ -537,6 +604,7 @@ fn parse_line(cfg: &mut Config, line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rgb::{Kind, Rgb, Speed};
 
     #[test]
     fn curve_eval_interpolates_and_clamps() {
@@ -625,10 +693,42 @@ mod tests {
         let mut g = FanSettings::new("nvml/0/fan0".into());
         g.mode = Mode::Manual(55.5);
         cfg.fans.push(g);
+        cfg.lighting.sync = Some(Effect {
+            kind: Kind::Breathing,
+            colors: [Rgb(255, 0, 64), Rgb(0, 0, 0)],
+            speed: Speed::Slow,
+            brightness: 70,
+        });
+        cfg.lighting.zones.insert(
+            "aura/argb1".into(),
+            ZoneLight::Own(Effect {
+                kind: Kind::Wave,
+                ..Default::default()
+            }),
+        );
+        cfg.lighting.zones.insert("gpu/0".into(), ZoneLight::Leave);
 
         let (back, errs) = Config::parse(&cfg.serialize());
         assert!(errs.is_empty(), "{errs:?}");
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn lighting_defaults_to_hands_off() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.lighting.wanted("aura/argb1"),
+            None,
+            "never touch lights unless asked"
+        );
+        let (cfg, errs) = Config::parse(
+            "light sync kind=static c1=#ff0000\nlight leave gpu/0\nlight zone ram/0 kind=off\nlight disco\nlight sync kind=strobe\n",
+        );
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        let red = cfg.lighting.wanted("aura/argb1").unwrap();
+        assert_eq!((red.kind, red.colors[0]), (Kind::Static, Rgb(255, 0, 0)));
+        assert_eq!(cfg.lighting.wanted("gpu/0"), None);
+        assert_eq!(cfg.lighting.wanted("ram/0").unwrap().kind, Kind::Off);
     }
 
     #[test]

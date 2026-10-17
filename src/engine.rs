@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::config::{Config, FanSettings};
 use crate::control::{self, MAX_MISSES, PLAUSIBLE_C, Reason, STALL_MIN_DUTY, STALL_SECS};
 use crate::hw::{Backend, detect_all};
+use crate::rgb::{Effect, Kind};
 
 /// Re-send the duty this often even if unchanged, in case firmware or the driver overrode it.
 const REASSERT: Duration = Duration::from_secs(10);
@@ -28,6 +29,8 @@ const CALIB_SETTLE: Duration = Duration::from_secs(4);
 const CALIB_SAMPLE: Duration = Duration::from_secs(2);
 /// Abort calibration when a watched sensor gets this close to the critical temperature.
 const CALIB_ABORT_MARGIN_C: f32 = 10.0;
+/// After a failed lighting write, wait this long before trying that zone again.
+const LIGHT_RETRY: Duration = Duration::from_secs(5);
 
 /// A running Calibrate sweep on one control.
 struct Calib {
@@ -70,12 +73,22 @@ pub struct ControlInfo {
     pub optional: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct LightInfo {
+    pub id: String,
+    pub label: String,
+    pub backend: &'static str,
+    pub leds: u16,
+    pub kinds: Vec<Kind>,
+}
+
 /// Static description of the detected hardware.
 #[derive(Clone, Debug, Default)]
 pub struct Inventory {
     pub temps: Vec<ChannelInfo>,
     pub fans: Vec<ChannelInfo>,
     pub controls: Vec<ControlInfo>,
+    pub lights: Vec<LightInfo>,
     pub diagnostics: Vec<String>,
 }
 
@@ -107,6 +120,16 @@ pub struct Snapshot {
     /// Calibration in progress: (control id, current duty, step number from 1, step count).
     pub calibrating: Option<(String, f32, usize, usize)>,
     pub last_calib: Option<CalibReport>,
+    pub lights: Vec<LightView>,
+    /// Result of the last "Save to device": (sequence number, errors).
+    pub light_save: Option<(u64, Vec<String>)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LightView {
+    /// Effect last sent to the zone (after fitting it to what the zone supports).
+    pub applied: Option<Effect>,
+    pub error: Option<String>,
 }
 
 impl Snapshot {
@@ -119,6 +142,7 @@ impl Snapshot {
 enum Command {
     SetConfig(Config),
     Calibrate(String),
+    SaveLights,
     Shutdown,
 }
 
@@ -151,6 +175,11 @@ impl EngineHandle {
                             engine.start_calibration(&id);
                             next = next.min(engine.last_tick + MIN_TICK_GAP);
                         }
+                        Ok(Command::SaveLights) => {
+                            engine.save_lights();
+                            engine.publish(&out);
+                            notify();
+                        }
                         Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {
                             engine.tick();
@@ -177,6 +206,11 @@ impl EngineHandle {
     /// Start the Calibrate sweep on one control (ignored if one is already running).
     pub fn calibrate(&self, id: &str) {
         let _ = self.tx.send(Command::Calibrate(id.to_owned()));
+    }
+
+    /// Store the current lighting in every device's flash.
+    pub fn save_lights(&self) {
+        let _ = self.tx.send(Command::SaveLights);
     }
 
     pub fn snapshot(&self) -> MutexGuard<'_, Snapshot> {
@@ -222,6 +256,15 @@ struct FanState {
     error: Option<String>,
 }
 
+#[derive(Default)]
+struct LightState {
+    applied: Option<Effect>,
+    error: Option<String>,
+    /// The effect whose write last failed, and the earliest time to try it again (a
+    /// different effect is tried at once).
+    failed: Option<(Effect, Instant)>,
+}
+
 /// Where a flat index lives: (backend, local index).
 type Loc = (usize, usize);
 
@@ -232,6 +275,9 @@ pub struct Engine {
     temp_loc: Vec<Loc>,
     fan_loc: Vec<Loc>,
     ctl_loc: Vec<Loc>,
+    light_loc: Vec<Loc>,
+    lights: Vec<LightState>,
+    light_save: Option<(u64, Vec<String>)>,
     // Per-backend read buffers.
     buf_t: Vec<Vec<Option<f32>>>,
     buf_f: Vec<Vec<Option<f32>>>,
@@ -262,7 +308,7 @@ impl Engine {
             diagnostics,
             ..Default::default()
         };
-        let (mut temp_loc, mut fan_loc, mut ctl_loc) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut temp_loc, mut fan_loc, mut ctl_loc, mut light_loc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (b, be) in backends.iter().enumerate() {
             let fan_base = inv.fans.len();
             for (i, c) in be.temps().iter().enumerate() {
@@ -292,6 +338,16 @@ impl Engine {
                 });
                 ctl_loc.push((b, i));
             }
+            for (i, z) in be.lights().iter().enumerate() {
+                inv.lights.push(LightInfo {
+                    id: z.id.clone(),
+                    label: z.label.clone(),
+                    backend: be.name(),
+                    leds: z.leds,
+                    kinds: z.kinds.clone(),
+                });
+                light_loc.push((b, i));
+            }
         }
         let now = Instant::now();
         Engine {
@@ -313,6 +369,9 @@ impl Engine {
                     error: None,
                 })
                 .collect(),
+            lights: (0..inv.lights.len()).map(|_| LightState::default()).collect(),
+            light_loc,
+            light_save: None,
             backends,
             cfg,
             inv: Arc::new(inv),
@@ -343,6 +402,7 @@ impl Engine {
         for k in 0..self.ctl.len() {
             self.control_one(k, dt, now);
         }
+        self.apply_lights(now);
         self.ready = true;
         self.ticks += 1;
     }
@@ -580,6 +640,53 @@ impl Engine {
         }
     }
 
+    /// Send each zone its wanted effect, but only when it differs from what it already shows
+    /// (effects run on the devices, so an unchanged effect is never re-sent). Zones the config
+    /// leaves alone are never written.
+    fn apply_lights(&mut self, now: Instant) {
+        for (k, &(b, i)) in self.light_loc.iter().enumerate() {
+            let info = &self.inv.lights[k];
+            let st = &mut self.lights[k];
+            let Some(want) = self.cfg.lighting.wanted(&info.id).and_then(|e| e.fit(&info.kinds)) else {
+                // Left alone: forget what we sent, so taking it back later re-sends.
+                *st = LightState::default();
+                continue;
+            };
+            if st.applied == Some(want) || st.failed.is_some_and(|(e, t)| e == want && now < t) {
+                continue;
+            }
+            match self.backends[b].set_light(i, &want) {
+                Ok(()) => {
+                    *st = LightState {
+                        applied: Some(want),
+                        ..Default::default()
+                    }
+                }
+                Err(e) => {
+                    st.error = Some(e.to_string());
+                    st.failed = Some((want, now + LIGHT_RETRY));
+                }
+            }
+        }
+    }
+
+    /// "Save to device": every backend with lighting stores what it shows now.
+    pub fn save_lights(&mut self) {
+        let mut errors = Vec::new();
+        for (b, be) in self.backends.iter_mut().enumerate() {
+            let used = self
+                .light_loc
+                .iter()
+                .zip(&self.lights)
+                .any(|(&(lb, _), st)| lb == b && st.applied.is_some());
+            if used && let Err(e) = be.save_lights() {
+                errors.push(format!("{}: {e}", be.name()));
+            }
+        }
+        let seq = self.light_save.as_ref().map_or(0, |s| s.0) + 1;
+        self.light_save = Some((seq, errors));
+    }
+
     pub fn publish(&self, out: &Mutex<Snapshot>) {
         let mut s = out.lock().unwrap_or_else(|e| e.into_inner());
         if !Arc::ptr_eq(&s.inv, &self.inv) {
@@ -611,6 +718,12 @@ impl Engine {
             )
         });
         s.last_calib.clone_from(&self.last_calib);
+        s.lights.clear();
+        s.lights.extend(self.lights.iter().map(|st| LightView {
+            applied: st.applied,
+            error: st.error.clone(),
+        }));
+        s.light_save.clone_from(&self.light_save);
     }
 }
 
@@ -627,8 +740,10 @@ impl Drop for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ZoneLight;
     use crate::config::{Curve, Mode};
-    use crate::hw::{Channel, ControlChannel, HwError};
+    use crate::hw::{Channel, ControlChannel, HwError, LightZone};
+    use crate::rgb::Rgb;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -638,6 +753,8 @@ mod tests {
         writes: Vec<f32>,
         releases: usize,
         fail_writes: bool,
+        lights: Vec<Effect>,
+        fail_lights: bool,
     }
 
     struct Mock {
@@ -645,6 +762,7 @@ mod tests {
         temps: Vec<Channel>,
         fans: Vec<Channel>,
         controls: Vec<ControlChannel>,
+        lights: Vec<LightZone>,
     }
 
     impl Backend for Mock {
@@ -679,6 +797,17 @@ mod tests {
             self.log.borrow_mut().releases += 1;
             Ok(())
         }
+        fn lights(&self) -> &[LightZone] {
+            &self.lights
+        }
+        fn set_light(&mut self, _: usize, e: &Effect) -> Result<(), HwError> {
+            let mut l = self.log.borrow_mut();
+            if l.fail_lights {
+                return Err("busy".into());
+            }
+            l.lights.push(*e);
+            Ok(())
+        }
     }
 
     fn setup(mode: Mode) -> (Engine, Rc<RefCell<Log>>) {
@@ -702,6 +831,12 @@ mod tests {
                 hw_min_pct: 0.0,
                 rpm_fan: Some(0),
                 optional: false,
+            }],
+            lights: vec![LightZone {
+                id: "z".into(),
+                label: "Z".into(),
+                leds: 8,
+                kinds: vec![Kind::Static, Kind::Breathing, Kind::Rainbow],
             }],
         };
         let mut cfg = Config::default();
@@ -856,5 +991,62 @@ mod tests {
         e.tick();
         assert_eq!(log.borrow().releases, 1);
         assert_eq!(e.ctl[0].applied, None);
+    }
+
+    #[test]
+    fn lights_untouched_unless_configured() {
+        let (mut e, log) = setup(Mode::Auto);
+        e.tick();
+        e.tick();
+        assert!(log.borrow().lights.is_empty());
+        e.cfg.lighting.sync = Some(Effect::default());
+        e.cfg.lighting.zones.insert("z".into(), ZoneLight::Leave);
+        e.tick();
+        assert!(log.borrow().lights.is_empty(), "a zone set to Leave is never written");
+    }
+
+    #[test]
+    fn sync_is_fitted_and_sent_only_on_change() {
+        let (mut e, log) = setup(Mode::Auto);
+        e.cfg.lighting.sync = Some(Effect {
+            kind: Kind::Wave,
+            ..Default::default()
+        });
+        e.tick();
+        e.tick();
+        e.tick();
+        assert_eq!(log.borrow().lights.len(), 1, "unchanged effects are not re-sent");
+        assert_eq!(
+            log.borrow().lights[0].kind,
+            Kind::Rainbow,
+            "Wave fitted to what the zone supports"
+        );
+        e.cfg.lighting.zones.insert(
+            "z".into(),
+            ZoneLight::Own(Effect {
+                kind: Kind::Static,
+                colors: [Rgb(255, 0, 0); 2],
+                ..Default::default()
+            }),
+        );
+        e.tick();
+        assert_eq!(log.borrow().lights.len(), 2);
+        assert_eq!(log.borrow().lights[1].colors[0], Rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn failed_light_writes_wait_unless_the_effect_changes() {
+        let (mut e, log) = setup(Mode::Auto);
+        e.cfg.lighting.sync = Some(Effect::default());
+        log.borrow_mut().fail_lights = true;
+        e.tick();
+        assert!(e.lights[0].error.is_some());
+        log.borrow_mut().fail_lights = false;
+        e.tick();
+        assert!(log.borrow().lights.is_empty(), "same effect: waits LIGHT_RETRY");
+        e.cfg.lighting.sync.as_mut().unwrap().brightness = 50;
+        e.tick();
+        assert_eq!(log.borrow().lights.len(), 1, "a new effect is tried at once");
+        assert!(e.lights[0].error.is_none());
     }
 }

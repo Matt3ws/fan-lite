@@ -4,6 +4,7 @@
 
 mod chrome;
 mod curve_editor;
+mod lighting;
 mod rename;
 mod theme;
 mod tray;
@@ -30,6 +31,7 @@ const HERO_H: f32 = 130.0;
 enum View {
     Main,
     Curves,
+    Lighting,
 }
 
 pub struct App {
@@ -73,6 +75,11 @@ pub struct App {
     dragging: Option<String>,
     /// Fans marked for mass editing (control ids, in click order). Empty = single selection.
     multi: Vec<String>,
+    /// Lighting zone whose settings are open.
+    light_sel: Option<String>,
+    /// Outcome of the last "Save to device", shown under the zone list.
+    light_note: Option<String>,
+    light_save_seen: u64,
 }
 
 /// What a fan row/display needs, gathered once per frame.
@@ -126,6 +133,9 @@ impl App {
             picking_preset: false,
             dragging: None,
             multi: Vec::new(),
+            light_sel: None,
+            light_note: None,
+            light_save_seen: 0,
         }
     }
 
@@ -447,6 +457,17 @@ impl App {
                 let trail = if self.settings_open { Icon::Up } else { Icon::Down };
                 if theme::button(ui, Some(Icon::Sliders), "Settings", Some(trail), self.settings_open).clicked() {
                     self.settings_open = !self.settings_open;
+                }
+                // The synced colour (or amber for multi-colour effects), dark when sync is off.
+                let light_dot = match &self.cfg.lighting.sync {
+                    Some(e) => e.swatch().map_or(AMBER, |c| Color32::from_rgb(c.0, c.1, c.2)),
+                    None => OUTLINE,
+                };
+                if theme::button(ui, Some(Icon::Dot(light_dot)), "Light", None, false)
+                    .on_hover_text("RGB lighting for every device")
+                    .clicked()
+                {
+                    self.view = View::Lighting;
                 }
                 let dot = if self.cfg.animations { AMBER } else { OUTLINE };
                 if theme::button(ui, Some(Icon::Dot(dot)), "Spin", None, false)
@@ -1359,6 +1380,16 @@ impl eframe::App for App {
                 None => {}
             }
         }
+        if let Some((seq, errors)) = &snap.light_save
+            && *seq != self.light_save_seen
+        {
+            self.light_save_seen = *seq;
+            self.light_note = Some(if errors.is_empty() {
+                "Saved to the devices.".into()
+            } else {
+                format!("Saving failed: {}", errors.join("; "))
+            });
+        }
         let mut content_h = 0.0;
         // Both closures need `self`; the title runs first, then the content.
         let this = std::cell::RefCell::new(&mut *self);
@@ -1373,6 +1404,7 @@ impl eframe::App for App {
                     changed |= match app.view {
                         View::Main => app.main_view(ui, &snap, &rows),
                         View::Curves => app.curves_view(ui, &snap),
+                        View::Lighting => app.lighting_view(ui, &snap),
                     };
                 });
                 content_h = out.content_size.y;

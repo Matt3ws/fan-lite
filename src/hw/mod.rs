@@ -3,6 +3,7 @@
 //! Backends are created and used only on the engine thread, so they need not be `Send`.
 
 pub mod amd_cpu;
+pub mod hid;
 pub mod kraken;
 pub mod nct6799;
 pub mod nvml;
@@ -10,6 +11,8 @@ pub mod pawnio;
 pub mod win;
 
 use std::fmt;
+
+use crate::rgb::{Effect, Kind};
 
 /// A read-only input (temperature or fan RPM).
 #[derive(Clone, Debug)]
@@ -31,6 +34,18 @@ pub struct ControlChannel {
     /// True for motherboard headers, which may have nothing plugged in. GPU fans are
     /// always present (they read 0 rpm in zero-RPM mode), so they are never auto-hidden.
     pub optional: bool,
+}
+
+/// A lighting zone: one header, strip, fan ring, DIMM or the board's own LEDs.
+#[derive(Clone, Debug)]
+pub struct LightZone {
+    /// Stable identifier used in the config file, e.g. `aura/argb1`.
+    pub id: String,
+    pub label: String,
+    /// Number of LEDs, if the device reports it (0 = unknown or a plain 12 V RGB header).
+    pub leds: u16,
+    /// Effects this zone can run itself. The engine fits other effects onto these.
+    pub kinds: Vec<Kind>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +81,20 @@ pub trait Backend {
     fn set_duty(&mut self, i: usize, pct: f32) -> Result<(), HwError>;
     /// Hand output `i` back to firmware/driver control. No-op if we never took it.
     fn release(&mut self, i: usize) -> Result<(), HwError>;
+
+    /// Lighting zones (none for most backends).
+    fn lights(&self) -> &[LightZone] {
+        &[]
+    }
+    /// Run effect `e` on zone `i`. `e.kind` is always one of the zone's `kinds`.
+    fn set_light(&mut self, _i: usize, _e: &Effect) -> Result<(), HwError> {
+        Err("this device has no lighting".into())
+    }
+    /// Store the current lighting in the device's flash, so it survives power cycles
+    /// without fan-lite. Only on request: flash wears out.
+    fn save_lights(&mut self) -> Result<(), HwError> {
+        Ok(())
+    }
 }
 
 pub struct Detected {
@@ -104,6 +133,12 @@ pub fn detect_all() -> Detected {
     match kraken::Kraken::detect() {
         Ok(b) => backends.push(Box::new(b)),
         Err(e) => diagnostics.push(format!("AIO: {e}")),
+    }
+
+    match crate::rgb::aura_usb::AuraUsb::detect() {
+        Ok(Some(b)) => backends.push(Box::new(b)),
+        Ok(None) => {}
+        Err(e) => diagnostics.push(format!("ASUS Aura: {e}")),
     }
 
     Detected { backends, diagnostics }

@@ -4,6 +4,7 @@
 
 mod chrome;
 mod curve_editor;
+mod icon;
 mod lighting;
 mod rename;
 mod startup;

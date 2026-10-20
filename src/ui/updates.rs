@@ -98,7 +98,15 @@ impl App {
             }
             Err(e) => {
                 let kept = std::env::current_exe().is_ok_and(|exe| update::rollback(&exe, new).is_ok());
-                UpdateState::Failed(if kept {
+                // 4551: an application control policy (Smart App Control) refused the new exe.
+                let blocked = e.raw_os_error() == Some(4551);
+                UpdateState::Failed(if kept && blocked {
+                    format!(
+                        "Windows (Smart App Control) blocked {tag}, so you're still on v{}. Its verdict \
+                         changes over time: try again later.",
+                        update::CURRENT
+                    )
+                } else if kept {
                     format!("Windows didn't start {tag} ({e}); still running v{}", update::CURRENT)
                 } else {
                     format!("{tag} installed but didn't start ({e}); start FanLite again")

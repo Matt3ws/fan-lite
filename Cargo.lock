@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "fan-lite"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "eframe",
  "raw-window-handle",
